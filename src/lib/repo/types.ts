@@ -19,6 +19,12 @@ export interface SchoolRepository {
   loadAll(): Promise<AppData>;
   /** Insert-or-update by national id (Student.id), deduped, in chunks of UPSERT_CHUNK_SIZE. Returns rows written. */
   upsertStudents(students: Student[], onProgress?: ProgressFn): Promise<number>;
+  /**
+   * Updates ONE existing student (by national id) with only the editable fields (name, grade, section,
+   * phone, phone2). Other students and all other fields (notes, Moodle data, ...) are left untouched.
+   * Throws RepoError('other', 'not_found') if the student does not exist (never inserts).
+   */
+  updateStudent(id: string, patch: import('../studentEdit').StudentEditPatch): Promise<void>;
   deleteStudents(ids: string[]): Promise<void>;
   deleteAllStudents(): Promise<void>;
   upsertTemplates(templates: MessageTemplate[]): Promise<void>;

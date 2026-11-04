@@ -4,6 +4,7 @@ import { mergeState } from '../../../supabase/functions/school-notify-sms-webhoo
  * dedupe by national id, chunked upserts (recorded in `studentBatches`), immediate campaigns.
  */
 import type { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../../types';
+import type { StudentEditPatch } from '../studentEdit';
 import { chunk, dedupeStudents, prepareLogs } from './mapping';
 import { AppData, ProgressFn, RepoError, SchoolRepository, UPSERT_CHUNK_SIZE, GatewayLogUpdate } from './types';
 
@@ -53,6 +54,14 @@ export class InMemorySchoolRepository implements SchoolRepository {
       onProgress?.(done, unique.length);
     }
     return done;
+  }
+
+  async updateStudent(id: string, patch: StudentEditPatch): Promise<void> {
+    this.maybeFail();
+    const key = String(id).trim();
+    const cur = this.students.get(key);
+    if (!cur) throw new RepoError('other', 'not_found');
+    this.students.set(key, { ...cur, name: patch.name, grade: patch.grade, section: patch.section, phone: patch.phone, phone2: patch.phone2 });
   }
 
   async deleteStudents(ids: string[]): Promise<void> {

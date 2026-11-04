@@ -23,6 +23,7 @@ import {
   templateToRow,
 } from './mapping';
 import { AppData, GatewayLogUpdate, ProgressFn, RepoError, SchoolRepository, UPSERT_CHUNK_SIZE } from './types';
+import type { StudentEditPatch } from '../studentEdit';
 import { mergeState } from '../../../supabase/functions/school-notify-sms-webhook/webhook';
 
 const PAGE = 1000;
@@ -102,6 +103,35 @@ export class SupabaseSchoolRepository implements SchoolRepository {
       throw toRepoError(err);
     }
     return done;
+  }
+
+  async updateStudent(id: string, patch: StudentEditPatch): Promise<void> {
+    const key = String(id).trim();
+    if (!key) throw new RepoError('other', 'not_found');
+    try {
+      // Read the current extra jsonb so only section/phone2 change inside it (notes etc. stay as stored).
+      const { data, error } = await this.sb
+        .from('students')
+        .select('extra')
+        .eq('owner', this.owner)
+        .eq('national_id', key)
+        .maybeSingle();
+      if (error) throw toRepoError(error);
+      if (!data) throw new RepoError('other', 'not_found');
+      const extra = { ...(((data as { extra: Record<string, unknown> | null }).extra ?? {}) as Record<string, unknown>) };
+      extra.section = patch.section;
+      extra.phone2 = patch.phone2;
+      const { data: updated, error: upErr } = await this.sb
+        .from('students')
+        .update({ name: patch.name, phone: patch.phone, class_name: patch.grade, extra, updated_at: new Date().toISOString() })
+        .eq('owner', this.owner)
+        .eq('national_id', key)
+        .select('id');
+      if (upErr) throw toRepoError(upErr);
+      if (!updated || (updated as unknown[]).length !== 1) throw new RepoError('other', 'update_count');
+    } catch (err) {
+      throw toRepoError(err);
+    }
   }
 
   async deleteStudents(ids: string[]): Promise<void> {
