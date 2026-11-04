@@ -67,9 +67,9 @@ describe('sendViaProxy', () => {
     expect(rejected.map(r => [r.id, r.error])).toEqual([['b', 'invalid_phone'], ['c', 'invalid_phone']]);
   });
 
-  it('batches by 50 and returns a per-recipient result', async () => {
+  it('caps batches at 50 and returns a per-recipient result', async () => {
     const invoke = vi.fn(async (body: any) => ({ ok: true as const, results: body.messages.map((m: any) => ({ id: m.id, ok: m.id !== 'm3' })) }));
-    const { results, fatalError } = await sendViaProxy(invoke, msgs(120));
+    const { results, fatalError } = await sendViaProxy(invoke, msgs(120), undefined, { batchSize: 500 });
     expect(invoke.mock.calls.map(c => (c[0] as any).messages.length)).toEqual([50, 50, 20]);
     expect(fatalError).toBeUndefined();
     expect(results).toHaveLength(120);

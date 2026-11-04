@@ -13,6 +13,10 @@ export const MAX_REQUEST_BYTES = 100_000;
 export const PHONE_RE = /^\+[1-9]\d{7,14}$/;
 /** Client-chosen opaque id used to match results; never a phone number. */
 export const ITEM_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+/** Max gateway message ids per `messageStatus` call. */
+export const MAX_STATUS_IDS = 50;
+/** SMSGate message id (OpenAPI: string, maxLength 36). */
+export const GATEWAY_ID_RE = /^[A-Za-z0-9_-]{1,36}$/;
 
 export interface SmsItem {
   id: string;
@@ -20,14 +24,20 @@ export interface SmsItem {
   text: string;
 }
 
-export type ProxyRequest = { action: 'status' } | { action: 'send'; messages: SmsItem[] };
+export type ProxyRequest =
+  | { action: 'status' }
+  | { action: 'send'; messages: SmsItem[] }
+  | { action: 'messageStatus'; ids: string[] };
 
 export type ValidationCode =
   | 'invalid_json'
   | 'invalid_action'
   | 'no_recipients'
   | 'too_many_recipients'
-  | 'invalid_item';
+  | 'invalid_item'
+  | 'no_ids'
+  | 'too_many_ids'
+  | 'invalid_id';
 
 export type ValidationResult =
   | { ok: true; value: ProxyRequest }
@@ -40,6 +50,20 @@ export function validateProxyRequest(body: unknown): ValidationResult {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'invalid_json' };
   const b = body as Record<string, unknown>;
   if (b.action === 'status') return { ok: true, value: { action: 'status' } };
+  if (b.action === 'messageStatus') {
+    const ids = b.ids;
+    if (!Array.isArray(ids) || ids.length === 0) return { ok: false, error: 'no_ids' };
+    if (ids.length > MAX_STATUS_IDS) return { ok: false, error: 'too_many_ids', details: [`max ${MAX_STATUS_IDS}`] };
+    const bad: string[] = [];
+    const seenIds = new Set<string>();
+    ids.forEach((id, i) => {
+      if (typeof id !== 'string' || !GATEWAY_ID_RE.test(id)) bad.push(`#${i}: invalid id`);
+      else if (seenIds.has(id)) bad.push(`#${i}: duplicate id`);
+      else seenIds.add(id);
+    });
+    if (bad.length) return { ok: false, error: 'invalid_id', details: bad };
+    return { ok: true, value: { action: 'messageStatus', ids: ids as string[] } };
+  }
   if (b.action !== 'send') return { ok: false, error: 'invalid_action' };
 
   const messages = b.messages;

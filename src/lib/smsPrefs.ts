@@ -25,6 +25,7 @@ export const UI_PREF_KEYS = {
   schoolName: 'sn_school_name',
   phonePrefix: 'sn_phone_prefix',
   smsSegmentPrice: 'sn_sms_segment_price',
+  smsBatchDelaySec: 'sn_sms_batch_delay_sec',
 } as const;
 
 export function readPref(key: string, fallback = ''): string {
@@ -41,4 +42,15 @@ export function writePref(key: string, value: string): void {
   } catch {
     /* ignore */
   }
+}
+
+/** Seconds to wait between gateway batches (0–300, default 10). */
+export function readBatchDelaySec(): number {
+  const n = Number(readPref(UI_PREF_KEYS.smsBatchDelaySec, '10'));
+  return Number.isFinite(n) ? Math.min(300, Math.max(0, Math.round(n))) : 10;
+}
+
+export function writeBatchDelaySec(sec: number): void {
+  const n = Number.isFinite(sec) ? Math.min(300, Math.max(0, Math.round(sec))) : 10;
+  writePref(UI_PREF_KEYS.smsBatchDelaySec, String(n));
 }

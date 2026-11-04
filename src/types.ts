@@ -78,6 +78,8 @@ export interface MessageLog {
   status: 'pending' | 'sent' | 'delivered' | 'failed'; // 'sent' = handed to gateway/app, NOT a delivery confirmation
   failureReason?: string;
   channel?: 'gateway' | 'manual'; // how the message was sent (optional, older logs don't have it)
+  gatewayMessageId?: string; // SMSGate message id (stored in meta jsonb)
+  gatewayState?: string; // last known SMSGate state, e.g. Pending/Processed/Sent/Delivered/Failed (meta jsonb)
 }
 
 export interface SchoolStats {

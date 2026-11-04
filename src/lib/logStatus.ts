@@ -10,8 +10,8 @@ import type { MessageLog } from '../types';
 export type LogStatus = MessageLog['status'];
 
 export const STATUS_LABELS: Record<LogStatus, string> = {
-  pending: 'بانتظار الإرسال',
-  sent: 'أُرسلت (بدون تأكيد استلام)',
+  pending: 'بانتظار الإرسال (أو قبلتها البوابة ولم يرسلها الهاتف بعد)',
+  sent: 'أُرسلت من الهاتف (بدون تأكيد استلام)',
   delivered: 'تم تأكيد الاستلام',
   failed: 'فشل الإرسال',
 };
@@ -46,4 +46,15 @@ export function summarizeLogs(logs: MessageLog[]): LogSummary {
 /** Status to record after a gateway call. Never 'delivered': we have no delivery receipt. */
 export function statusAfterGatewayCall(ok: boolean): LogStatus {
   return ok ? 'sent' : 'failed';
+}
+
+/**
+ * Status to record from the gateway's per-message state. 'sent' only when the phone actually sent it;
+ * an accepted-but-not-yet-sent message stays 'pending' (with meta.gatewayState = 'Pending'/'Processed').
+ */
+export function statusFromGatewayState(state: string | undefined): LogStatus {
+  if (state === 'Delivered') return 'delivered';
+  if (state === 'Sent') return 'sent';
+  if (state === 'Failed' || state === 'Cancelled') return 'failed';
+  return 'pending';
 }
