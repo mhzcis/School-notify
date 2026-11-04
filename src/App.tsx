@@ -10,6 +10,7 @@ import { DEFAULT_TEMPLATES } from './data/mockStudents';
 // Component imports
 import DashboardOverview from './components/DashboardOverview';
 import ExcelImporter from './components/ExcelImporter';
+import { applyStudentEdit, StudentEditPatch } from './lib/studentEdit';
 import MessageComposer, { ComposerPrefill } from './components/MessageComposer';
 import { summarizeLogs } from './lib/logStatus';
 import TemplatesManager from './components/TemplatesManager';
@@ -215,6 +216,19 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
         reportError(err);
       }
     })();
+  };
+
+  // Single-student edit (name, grade, section, phone 1, phone 2). Changes ONLY that student's record.
+  const handleEditStudent = async (id: string, patch: StudentEditPatch): Promise<boolean> => {
+    try {
+      await repo.updateStudent(id, patch);
+      setStudents(prev => applyStudentEdit(prev, id, patch));
+      triggerNotification('تم حفظ تعديل بيانات الطالب في السحابة.');
+      return true;
+    } catch (err) {
+      reportError(err);
+      return false;
+    }
   };
 
   // 2. Add Saved Template Trigger
@@ -656,6 +670,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               onNavigateToTab={(tab) => setActiveTab(tab)} 
               students={students}
               onUpdateStudents={handleUpdateStudents}
+              onEditStudent={handleEditStudent}
               schoolName={schoolName}
               onUpdateSchoolName={handleUpdateSchoolName}
             />
@@ -665,6 +680,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
             <MessageComposer
               students={students}
               templates={templates}
+              onEditStudent={handleEditStudent}
               onSendImmediate={handleSendImmediate}
               onGatewayStatuses={m => { void handleGatewayStatuses(m); }}
               prefill={composerPrefill}

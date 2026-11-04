@@ -7,6 +7,8 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { renderTemplate, PLACEHOLDERS, missingMoodleFields } from '../lib/template';
 import SecretText from './SecretText';
+import StudentEditDialog from './StudentEditDialog';
+import type { StudentEditPatch } from '../lib/studentEdit';
 import { buildDispatchItems } from '../lib/recipients';
 import { matchNames } from '../lib/nameMatching';
 import { segmentInfo } from '../lib/sms';
@@ -91,6 +93,8 @@ interface MessageComposerProps {
   /** A scheduled campaign loaded for a manual, user-confirmed send (scheduled campaigns are never auto-sent). */
   prefill?: ComposerPrefill | null;
   onPrefillConsumed?: () => void;
+  /** Saves an edit of ONE student; resolves true on success. */
+  onEditStudent?: (id: string, patch: StudentEditPatch) => Promise<boolean>;
 }
 
 export interface ComposerPrefill {
@@ -103,6 +107,7 @@ export interface ComposerPrefill {
 
 export default function MessageComposer({
   students,
+  onEditStudent,
   templates,
   onSendImmediate,
   onGatewayStatuses,
@@ -131,6 +136,7 @@ export default function MessageComposer({
   const [selectedSection, setSelectedSection] = useState<string>('');
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
+  const [editingStudent, setEditingStudent] = useState<Student | null>(null);
 
   // Composer states
   const [campaignTitle, setCampaignTitle] = useState<string>('حملة تواصل مدرسية');
@@ -1217,6 +1223,9 @@ export default function MessageComposer({
               </button>
             </div>
 
+            {onEditStudent && (
+              <StudentEditDialog student={editingStudent} onCancel={() => setEditingStudent(null)} onSave={onEditStudent} />
+            )}
             <div className="flex-1 overflow-y-auto max-h-[220px] lg:max-h-[340px] border border-slate-100 rounded-xl divide-y divide-slate-50 bg-slate-50/20" id="recipient-pool-selector">
               {visiblePool.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center p-6 text-center text-slate-400 text-xs">
@@ -1262,7 +1271,19 @@ export default function MessageComposer({
                         )}
                       </div>
 
-                      <div className="relative flex items-center justify-center">
+                      <div className="relative flex items-center justify-center gap-2">
+                        {onEditStudent && (
+                          <button
+                            type="button"
+                            title="تعديل بيانات الطالب"
+                            aria-label={`تعديل بيانات ${student.name}`}
+                            data-testid={`edit-student-${student.id}`}
+                            onClick={e => { e.stopPropagation(); setEditingStudent(student); }}
+                            className="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 cursor-pointer"
+                          >
+                            ✏️ تعديل
+                          </button>
+                        )}
                         <input
                           type="checkbox"
                           checked={isChecked}

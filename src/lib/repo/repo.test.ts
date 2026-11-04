@@ -143,3 +143,68 @@ describe('SupabaseSchoolRepository', () => {
     await expect(repo.upsertStudents(fakeStudents(2))).rejects.toMatchObject({ kind: 'auth' });
   });
 });
+
+describe('updateStudent', () => {
+  const patch = { name: 'طالب تجريبي معدل', grade: 'التاسع', section: 'ج', phone: '', phone2: '0590000077' };
+
+  it('in-memory: updates one student only, keeps notes and count', async () => {
+    const students = fakeStudents(4).map(s => ({ ...s, notes: 'ملاحظة تجريبية' }));
+    const repo = new InMemorySchoolRepository({ students });
+    await repo.updateStudent(students[1].id, patch);
+    const after = (await repo.loadAll()).students;
+    expect(after).toHaveLength(4);
+    expect(after.find(s => s.id === students[1].id)).toEqual({ ...students[1], ...patch });
+    for (const s of [students[0], students[2], students[3]]) expect(after.find(x => x.id === s.id)).toEqual(s);
+    await expect(repo.updateStudent('9999999999', patch)).rejects.toMatchObject({ kind: 'other' });
+    expect((await repo.loadAll()).students).toHaveLength(4);
+  });
+
+  function fakeUpdateSb(existing: Record<string, unknown> | null, updatedCount = 1) {
+    const calls: any[] = [];
+    const sb: any = {
+      from(table: string) {
+        const filters: any[] = [];
+        const q: any = {
+          select(cols: string) {
+            calls.push({ table, op: 'select', cols, filters });
+            return q;
+          },
+          eq(col: string, val: string) { filters.push([col, val]); return q; },
+          maybeSingle: async () => ({ data: existing ? { extra: existing } : null, error: null }),
+          update(patch: any) {
+            const u = { table, op: 'update', patch, filters: [] as any[] };
+            calls.push(u);
+            const uq: any = {
+              eq(col: string, val: string) { u.filters.push([col, val]); return uq; },
+              select: async () => ({ data: Array.from({ length: updatedCount }, () => ({ id: 'x' })), error: null }),
+            };
+            return uq;
+          },
+        };
+        return q;
+      },
+    };
+    return { sb, calls };
+  }
+
+  it('supabase: one UPDATE scoped by owner + national_id, merges section/phone2 into extra and keeps notes', async () => {
+    const { sb, calls } = fakeUpdateSb({ section: 'أ', phone2: '', notes: 'ملاحظة تجريبية', nameEn: 'Test' });
+    const repo = new SupabaseSchoolRepository(sb, OWNER);
+    await repo.updateStudent(' 1000000001 ', patch);
+    const updates = calls.filter(c => c.op === 'update');
+    expect(updates).toHaveLength(1);
+    expect(calls.some(c => c.op === 'upsert' || c.op === 'insert' || c.op === 'delete')).toBe(false);
+    expect(updates[0].table).toBe('students');
+    expect(updates[0].filters).toEqual([['owner', OWNER], ['national_id', '1000000001']]);
+    expect(updates[0].patch).toMatchObject({
+      name: patch.name, phone: '', class_name: 'التاسع',
+      extra: { section: 'ج', phone2: '0590000077', notes: 'ملاحظة تجريبية', nameEn: 'Test' },
+    });
+    expect(Object.keys(updates[0].patch).sort()).toEqual(['class_name', 'extra', 'name', 'phone', 'updated_at']);
+  });
+
+  it('supabase: missing student or unexpected row count is an error (never inserts)', async () => {
+    await expect(new SupabaseSchoolRepository(fakeUpdateSb(null).sb, OWNER).updateStudent('1000000001', patch)).rejects.toMatchObject({ kind: 'other' });
+    await expect(new SupabaseSchoolRepository(fakeUpdateSb({}, 0).sb, OWNER).updateStudent('1000000001', patch)).rejects.toMatchObject({ kind: 'other' });
+  });
+});

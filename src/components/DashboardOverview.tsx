@@ -8,6 +8,8 @@ import React, { useState, useMemo } from 'react';
 import { SchoolStats, Student } from '../types';
 import { checkPhone, isSendablePhone, PHONE_PROBLEM_LABELS } from '../lib/phone';
 import SecretText from './SecretText';
+import StudentEditDialog from './StudentEditDialog';
+import type { StudentEditPatch } from '../lib/studentEdit';
 import { 
   Users2, 
   School, 
@@ -43,6 +45,8 @@ interface DashboardOverviewProps {
   onUpdateStudents?: React.Dispatch<React.SetStateAction<Student[]>>;
   schoolName: string;
   onUpdateSchoolName: (name: string) => void;
+  /** Saves an edit of ONE student; resolves true on success. */
+  onEditStudent?: (id: string, patch: StudentEditPatch) => Promise<boolean>;
 }
 
 export default function DashboardOverview({ 
@@ -51,12 +55,14 @@ export default function DashboardOverview({
   userEmail,
   students = [],
   onUpdateStudents,
+  onEditStudent,
   schoolName,
   onUpdateSchoolName
 }: DashboardOverviewProps) {
 
   // Local state for searching & filtering the student directory
   const [searchTerm, setSearchTerm] = useState('');
+  const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [selectedGradeFilter, setSelectedGradeFilter] = useState('all');
   const [selectedSectionFilter, setSelectedSectionFilter] = useState('all');
 
@@ -355,6 +361,9 @@ export default function DashboardOverview({
 
   return (
     <div className="space-y-6" id="dashboard-overview-container">
+      {onEditStudent && (
+        <StudentEditDialog student={editingStudent} onCancel={() => setEditingStudent(null)} onSave={onEditStudent} />
+      )}
       
       {/* Editorial Welcome Card */}
       <div className="relative overflow-hidden rounded-3xl bg-radial from-slate-900 via-slate-800 to-slate-950 p-6 sm:p-8 text-white shadow-xl border border-slate-800">
@@ -817,6 +826,19 @@ export default function DashboardOverview({
                       <td className="py-3 px-4">
                         <div className="flex items-center justify-center gap-2.5">
                           
+                          {onEditStudent && (
+                            <button
+                              type="button"
+                              onClick={() => setEditingStudent(student)}
+                              title="تعديل بيانات الطالب"
+                              aria-label={`تعديل بيانات ${student.name}`}
+                              data-testid={`dashboard-edit-student-${student.id}`}
+                              className="p-1.5 rounded-lg bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition cursor-pointer flex items-center justify-center shadow-3xs text-xs"
+                            >
+                              ✏️
+                            </button>
+                          )}
+
                           {/* 📞 Call Student Button */}
                           <button
                             onClick={() => setActiveCallStudent(student)}
