@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { gatewayBlockReason, SERVER_PROXY_AVAILABLE } from '../lib/hosting';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { renderTemplate, PLACEHOLDERS, missingMoodleFields } from '../lib/template';
@@ -13,9 +12,12 @@ import { matchNames } from '../lib/nameMatching';
 import { segmentInfo } from '../lib/sms';
 import ConfirmSendDialog from './ConfirmSendDialog';
 import { statusAfterGatewayCall } from '../lib/logStatus';
-import { PHONE_PROBLEM_LABELS, toInternational } from '../lib/phone';
+import { PHONE_PROBLEM_LABELS } from '../lib/phone';
 import { Student, MessageTemplate, ScheduledMessage, MessageLog } from '../types';
-import { readObject } from '../lib/storage';
+import { readUseCloudGateway } from '../lib/smsPrefs';
+import { invokeSmsFunction } from '../lib/supabase';
+import { proxyErrorMessage, sendViaProxy, ProxyItemResult } from '../lib/smsProxy';
+import { newId as newLogId } from '../lib/repo/mapping';
 import { 
   Send, 
   Calendar, 
@@ -68,22 +70,6 @@ function isNoiseRow(name: string): boolean {
   }
   
   return noiseKeywords.some(keyword => lower.includes(keyword));
-}
-
-// Formats phone numbers into clean international format with starting "+" for SMSGate API
-function formatPhoneWithPlus(phone: string): string {
-  if (!phone) return '';
-  let clean = phone.trim().replace(/\+/g, '').replace(/\s+/g, '');
-  if (clean.startsWith('05')) {
-    clean = '970' + clean.substring(1);
-  }
-  if (clean.startsWith('00')) {
-    return '+' + clean.substring(2);
-  }
-  if (!clean.startsWith('+')) {
-    return '+' + clean;
-  }
-  return clean;
 }
 
 interface MessageComposerProps {
@@ -382,80 +368,12 @@ export default function MessageComposer({
   const [scheduleDate, setScheduleDate] = useState<string>('');
   const [scheduleTime, setScheduleTime] = useState<string>('');
 
-  // 1. REAL SMS GATEWAY STATES
-  const [smsSettings, setSmsSettings] = useState<{
-    configured: boolean;
-    types: { twilio: boolean; custom: boolean };
-    message: string;
-    envKeysPresent?: Record<string, boolean>;
-  }>({
-    configured: false,
-    types: { twilio: false, custom: false },
-    message: "جاري التحقق من حالة بوابة الرسائل الفعالة..."
-  });
-
   const [sendMode, setSendMode] = useState<'manual_sequential'>('manual_sequential');
   const whatsappWindowRef = useRef<Window | null>(null);
 
-  // 1.5. SILENT HANDS-FREE API GATEWAY CONFIGS (Stays in local storage for zero-click silent sending)
-  const [useSilentGateway, setUseSilentGateway] = useState<boolean>(() => {
-    return localStorage.getItem('resal_use_silent_gateway') === 'true';
-  });
-
-  const [silentGatewayConfig, setSilentGatewayConfig] = useState<{
-    name: string;
-    apiUrl: string;
-    method: 'GET' | 'POST';
-    headers: string;
-    body: string;
-    testPhone: string;
-    gatewayType: 'android_local' | 'custom_api';
-    androidIp: string;
-    androidAppType: 'sms_gateway_core' | 'android_sms_server' | 'sms_gate_app' | 'sms_gate_cloud' | 'custom';
-    smsGateCloudToken?: string;
-    smsGateCloudUsername?: string;
-    smsGateCloudPassword?: string;
-    smsGateLocalToken?: string;
-    smsGateLocalUsername?: string;
-    smsGateLocalPassword?: string;
-  }>(() => {
-    const parsed: any = readObject<Record<string, any>>('resal_silent_gateway_config', {});
-    return {
-      name: parsed.name || 'بوابة الـ API المدرسية المستقلة',
-      apiUrl: parsed.apiUrl || 'http://192.168.1.50:8080/send?phone={{PHONE}}&message={{MESSAGE}}',
-      method: parsed.method || 'GET',
-      headers: parsed.headers || '{\n  "Content-Type": "application/json"\n}',
-      body: parsed.body || '{\n  "phone": "{{PHONE}}",\n  "text": "{{MESSAGE}}"\n}',
-      testPhone: parsed.testPhone || '0599000000',
-      gatewayType: parsed.gatewayType || 'android_local',
-      androidIp: parsed.androidIp || '192.168.1.15',
-      androidAppType: parsed.androidAppType || 'sms_gateway_core',
-      smsGateCloudToken: parsed.smsGateCloudToken || '',
-      smsGateCloudUsername: parsed.smsGateCloudUsername || '',
-      smsGateCloudPassword: parsed.smsGateCloudPassword || '',
-      smsGateLocalToken: parsed.smsGateLocalToken || '',
-      smsGateLocalUsername: parsed.smsGateLocalUsername || '',
-      smsGateLocalPassword: parsed.smsGateLocalPassword || ''
-    };
-  });
-
-  const [gatewayConfigCollapsed, setGatewayConfigCollapsed] = useState<boolean>(true);
-  const [testSendingStatus, setTestSendingStatus] = useState<{
-    loading: boolean;
-    success?: boolean;
-    text?: string;
-  }>({ loading: false });
-
-  // Sync silent gateway configs to localStorage
-  useEffect(() => {
-    localStorage.setItem('resal_use_silent_gateway', String(useSilentGateway));
-  }, [useSilentGateway]);
-
-
-
-  useEffect(() => {
-    localStorage.setItem('resal_silent_gateway_config', JSON.stringify(silentGatewayConfig));
-  }, [silentGatewayConfig]);
+  // Cloud SMS gateway (Supabase Edge Function). Only the on/off choice is a local UI preference;
+  // the SMSGate credentials exist only as server secrets.
+  const [useSilentGateway] = useState<boolean>(() => readUseCloudGateway());
 
   // Automated silent background progress overlay monitor
   const [isSilentBroadcastActive, setIsSilentBroadcastActive] = useState<boolean>(false);
@@ -485,121 +403,6 @@ export default function MessageComposer({
     results: []
   });
 
-  // Dynamic remote SMS dispatch connection tester
-  const testSilentGatewayConnection = async () => {
-    const blockReason = gatewayBlockReason(silentGatewayConfig);
-    if (blockReason) {
-      setTestSendingStatus({ loading: false, success: false, text: `⚠️ ${blockReason}` });
-      return;
-    }
-    if (silentGatewayConfig.gatewayType === 'android_local') {
-      if (silentGatewayConfig.androidAppType === 'sms_gate_cloud') {
-        const username = silentGatewayConfig.smsGateCloudUsername || "";
-        const password = silentGatewayConfig.smsGateCloudPassword || "";
-        if (!username.trim() || !password.trim()) {
-          return alert('الرجاء كتابة اسم المستخدم وكلمة المرور الخاصة بسحابة SMSGate أولاً.');
-        }
-        setTestSendingStatus({ loading: true });
-        try {
-          const response = await fetch('/api/send-sms', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              phone: silentGatewayConfig.testPhone,
-              message: `رسالة فحص وتأكيد نجاح الاتصال ببوابتك الذكية - ${schoolName}`,
-              studentName: 'طالب افتراضي فحص',
-              customGateway: {
-                androidAppType: 'sms_gate_cloud',
-                smsGateCloudUsername: username.trim(),
-                smsGateCloudPassword: password.trim()
-              }
-            })
-          });
-
-          const resData = await response.json();
-          if (response.ok && resData.success) {
-            setTestSendingStatus({
-              loading: false,
-              success: true,
-              text: `✓ رائع! نجح الاتصال السحابي وتم إرسال رسالة الفحص إلى سحابة SMSGate بنجاح لـ (${schoolName}). يرجى مراجعة هاتفك للتأكد من وصولها.`
-            });
-          } else {
-            setTestSendingStatus({
-              loading: false,
-              success: false,
-              text: `⚠️ عذراً: سيرفر SMSGate Cloud أعاد كود خطأ: ${resData.message || 'رمز خطأ مجهول'}`
-            });
-          }
-        } catch (err: any) {
-          setTestSendingStatus({
-            loading: false,
-            success: false,
-            text: `❌ عذراً: فشل الاتصال بخادم الرسائل السحابي: ${err.message || String(err)}`
-          });
-        }
-        return;
-      }
-
-      // Local WiFi SMSGate Mode
-      if (!silentGatewayConfig.androidIp.trim()) {
-        return alert('الرجاء كتابة عنوان IP الجوال الخاص بك أولاً.');
-      }
-      const username = silentGatewayConfig.smsGateLocalUsername || "";
-      const password = silentGatewayConfig.smsGateLocalPassword || "";
-      if (!username.trim() || !password.trim()) {
-        return alert('الرجاء كتابة اسم المستخدم وكلمة المرور لتطبيق SMSGate لتفعيل المصادقة والمطابقة.');
-      }
-
-      setTestSendingStatus({ loading: true });
-      try {
-        let cleanIp = silentGatewayConfig.androidIp.trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
-        if (!cleanIp.includes(':')) {
-          cleanIp = cleanIp + ':8080';
-        }
-        
-        const localUrl = `http://${cleanIp}/message`;
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
-          'Authorization': `Basic ${btoa(username.trim() + ':' + password.trim())}`
-        };
-        
-        const formattedPhone = formatPhoneWithPlus(silentGatewayConfig.testPhone);
-        
-        const requestOptions = {
-          method: 'POST',
-          headers: headers,
-          body: JSON.stringify({
-            textMessage: { text: `رسالة فحص وتأكيد نجاح الاتصال ببوابتك الذكية - ${schoolName}` },
-            phoneNumbers: [formattedPhone]
-          })
-        };
-
-        await fetch(localUrl, requestOptions);
-
-        setTestSendingStatus({
-          loading: false,
-          success: true,
-          text: `✓ تم إرسال طلب الفحص بنجاح من متصفحك إلى الجوال محلياً لـ (${schoolName})! يرجى فحص هاتفك للتأكد من وصول الرسالة عبر تطبيق SMSGate.`
-        });
-      } catch (err: any) {
-        setTestSendingStatus({
-          loading: false,
-          success: false,
-          text: `❌ عذراً: فشل الاتصال بجوال الأندرويد محلياً. تأكد أن الهاتف موصول بنفس شبكة الـ Wi-Fi، وأن تطبيق SMSGate قيد التشغيل، وأنك قمت بتعديل أمان المحتوى لـ "Insecure Content" بالمتصفح: ${err.message || String(err)}`
-        });
-      }
-    } else {
-      // Custom API mode fallback alert if any
-      setTestSendingStatus({
-        loading: false,
-        success: false,
-        text: '⚠️ تم إيقاف بوابات الـ API الأخرى بطلب الإدارة. الرجاء استخدام تطبيق SMSGate فقط.'
-      });
-    }
-  };
-
   // Manual sequential browser communication broadcast state controllers
   const [isManualSequentialActive, setIsManualSequentialActive] = useState<boolean>(false);
   const [sequentialQueue, setSequentialQueue] = useState<Array<{
@@ -618,32 +421,6 @@ export default function MessageComposer({
   const [autoPlayTimerSec, setAutoPlayTimerSec] = useState<number>(4); // default 4 seconds
   const [countdownRemaining, setCountdownRemaining] = useState<number>(4);
   const [accumulatedManualLogs, setAccumulatedManualLogs] = useState<MessageLog[]>([]);
-
-  // Fetch gateway settings status on mount
-  useEffect(() => {
-    if (!SERVER_PROXY_AVAILABLE) {
-      // Static hosting (GitHub Pages): there is no /api backend.
-      setSmsSettings({
-        configured: false,
-        types: { twilio: false, custom: false },
-        message: "التطبيق يعمل كموقع ثابت (GitHub Pages) بدون خادم وسيط."
-      });
-      return;
-    }
-    fetch('/api/sms-settings')
-      .then(res => res.json())
-      .then(data => {
-        setSmsSettings(data);
-      })
-      .catch(err => {
-        console.warn("Could not check server SMS settings", err);
-        setSmsSettings({
-          configured: false,
-          types: { twilio: false, custom: false },
-          message: "تعذر الاتصال بخادم البوابة أو أن التطبيق يعمل بشكل مستقل حالياً."
-        });
-      });
-  }, []);
 
   const handleSaveAsTemplate = () => {
     if (!messageContent.trim()) return;
@@ -884,7 +661,7 @@ export default function MessageComposer({
     });
 
     // Opening the messaging app is NOT a delivery confirmation: record it as 'sent' (manual channel)
-    const logId = 'LOG' + Math.floor(100000 + Math.random() * 900000);
+    const logId = newLogId();
     const newLog: MessageLog = {
       id: logId,
       studentId: item.studentId,
@@ -1029,13 +806,8 @@ export default function MessageComposer({
         return alert('لا يوجد أي رقم جوال صالح بين المستلمين المحددين. راجع أرقام الطلاب أولاً.');
       }
 
-      const silentBlockReason = useSilentGateway ? gatewayBlockReason(silentGatewayConfig) : null;
-      if (silentBlockReason) {
-        return alert(silentBlockReason);
-      }
-
       if (useSilentGateway) {
-        // Trigger automated silent background gateway dispatcher
+        // Cloud gateway: batches go to the authenticated Edge Function (max 50 recipients per call).
         setSilentProgress({
           current: 0,
           total: itemsToDispatch.length,
@@ -1043,131 +815,47 @@ export default function MessageComposer({
           stage: 'sending',
           successCount: 0,
           failedCount: 0,
-          statusText: 'جاري البدء ببث الرسائل الفعلية صامتاً عبر بوابة الـ API الخارجية...',
+          statusText: 'جاري إرسال الرسائل عبر خادم الإرسال الآمن...',
           results: []
         });
         setIsSilentBroadcastActive(true);
 
         (async () => {
-          const generatedLogs: MessageLog[] = [];
-          let successAcc = 0;
-          let failAcc = 0;
-          const resultsAccumulator: Array<{
-            name: string;
-            phone: string;
-            status: 'success' | 'failed';
-            message: string;
-            content: string;
-          }> = [];
-
-          for (let i = 0; i < itemsToDispatch.length; i++) {
-            const item = itemsToDispatch[i];
-            
-            setSilentProgress(prev => ({
-              ...prev,
-              current: i + 1,
-              studentName: item.studentName,
-              statusText: `جاري بث الرسالة تلقائياً للرقم (${item.phone}) مخصصة للطالب ${item.studentName}...`
-            }));
-
-            let isSuccess = false;
-            let errorText = 'مشكلة غير معروفة';
-
-            if (silentGatewayConfig.gatewayType === 'android_local') {
-              if (silentGatewayConfig.androidAppType === 'sms_gate_cloud') {
-                try {
-                  const response = await fetch('/api/send-sms', {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                      phone: item.phone,
-                      message: item.content,
-                      studentName: item.studentName,
-                      customGateway: {
-                        androidAppType: 'sms_gate_cloud',
-                        smsGateCloudUsername: silentGatewayConfig.smsGateCloudUsername || '',
-                        smsGateCloudPassword: silentGatewayConfig.smsGateCloudPassword || ''
-                      }
-                    })
-                  });
-
-                  const resData = await response.json();
-                  if (response.ok && resData.success) {
-                    isSuccess = true;
-                    successAcc++;
-                  } else {
-                    isSuccess = false;
-                    errorText = resData.message || 'فشلت سحابة SMSGate في إرسال الرسالة';
-                    failAcc++;
-                  }
-                } catch (err: any) {
-                  isSuccess = false;
-                  errorText = err.message || 'فشل الاتصال بسيرفر SMSGate Cloud المتصل بجوالك';
-                  failAcc++;
-                }
-              } else {
-                // SMSGate local mode
-                try {
-                  let cleanIp = silentGatewayConfig.androidIp.trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
-                  if (!cleanIp.includes(':')) {
-                    cleanIp = cleanIp + ':8080';
-                  }
-                  
-                  const localUrl = `http://${cleanIp}/message`;
-                  const headers: Record<string, string> = {
-                    'Content-Type': 'application/json'
-                  };
-                  const username = silentGatewayConfig.smsGateLocalUsername || '';
-                  const password = silentGatewayConfig.smsGateLocalPassword || '';
-                  if (username.trim() || password.trim()) {
-                    headers['Authorization'] = `Basic ${btoa(username.trim() + ':' + password.trim())}`;
-                  }
-
-                  const formattedPhone = toInternational(item.phone);
-
-                  const requestOptions = {
-                    method: 'POST',
-                    headers: headers,
-                    body: JSON.stringify({
-                      textMessage: { text: item.content },
-                      phoneNumbers: [formattedPhone]
-                    })
-                  };
-
-                  const localResponse = await fetch(localUrl, requestOptions);
-                  if (localResponse.ok) {
-                    isSuccess = true;
-                    successAcc++;
-                  } else {
-                    isSuccess = false;
-                    errorText = `رفض SMSGate المحلي الطلب (HTTP ${localResponse.status})`;
-                    failAcc++;
-                  }
-                } catch (localErr: any) {
-                  isSuccess = false;
-                  errorText = localErr.message || 'فشل الاتصال بـ SMSGate على هاتف الأندرويد لسبب شبكي أو CORS';
-                  failAcc++;
-                }
-              }
-            } else {
-              isSuccess = false;
-              errorText = 'هذه البوابة تم إلغاؤها بناءً على طلبكم. يرجى تهيئة سحابة أو محلي SMSGate';
-              failAcc++;
-            }
-
-            const currentResult = {
+          const keyed = itemsToDispatch.map((item, idx) => ({ key: `m${idx}`, item }));
+          const byKey = new Map(keyed.map(k => [k.key, k.item]));
+          const toRow = (r: ProxyItemResult) => {
+            const item = byKey.get(r.id)!;
+            return {
               name: item.studentName,
               phone: item.phone,
-              status: isSuccess ? 'success' as const : 'failed' as const,
-              message: isSuccess ? 'سُلّمت للبوابة (لا يوجد تأكيد استلام من الهاتف بعد)' : errorText,
+              status: r.ok ? 'success' as const : 'failed' as const,
+              message: r.ok ? 'سُلّمت للبوابة (لا يوجد تأكيد استلام من الهاتف بعد)' : proxyErrorMessage(r.error),
               content: item.logContent ?? item.content
             };
-            resultsAccumulator.push(currentResult);
+          };
+          const { results, fatalError } = await sendViaProxy(
+            invokeSmsFunction,
+            keyed.map(k => ({ id: k.key, phone: k.item.phone, text: k.item.content })),
+            partial => {
+              const rows = partial.map(toRow);
+              const ok = partial.filter(r => r.ok).length;
+              const last = partial[partial.length - 1];
+              setSilentProgress(prev => ({
+                ...prev,
+                current: partial.length,
+                studentName: last ? byKey.get(last.id)?.studentName || '' : prev.studentName,
+                successCount: ok,
+                failedCount: partial.length - ok,
+                results: rows
+              }));
+            }
+          );
 
-            generatedLogs.push({
-              id: 'LOG' + Math.floor(100000 + Math.random() * 900000),
+          const now = new Date().toISOString();
+          const generatedLogs: MessageLog[] = results.map(r => {
+            const item = byKey.get(r.id)!;
+            return {
+              id: newLogId(),
               studentId: item.studentId,
               studentName: item.studentName,
               parentName: item.parentName,
@@ -1175,31 +863,27 @@ export default function MessageComposer({
               grade: item.grade,
               section: item.section,
               messageContent: item.logContent ?? item.content, // never store the Moodle password in logs
-              sentTime: new Date().toISOString(),
-              status: statusAfterGatewayCall(isSuccess),
-              failureReason: isSuccess ? undefined : errorText,
-              channel: 'gateway',
+              sentTime: now,
+              status: statusAfterGatewayCall(r.ok),
+              failureReason: r.ok ? undefined : proxyErrorMessage(r.error),
+              channel: 'gateway' as const,
               campaignId: activeCampaignIdRef.current,
-            });
-
-            setSilentProgress(prev => ({
-              ...prev,
-              successCount: successAcc,
-              failedCount: failAcc,
-              results: [...resultsAccumulator]
-            }));
-
-            // Small dynamic cooling pause to maintain network stability
-            await new Promise(res => setTimeout(res, 400));
-          }
+            };
+          });
 
           setSilentProgress(prev => ({
             ...prev,
             stage: 'finished',
-            statusText: 'تم الانتهاء تماماً من معالجة جميع أرقام الدفعة عبر البوابة الصامتة!'
+            statusText: fatalError
+              ? `توقف الإرسال: ${proxyErrorMessage(fatalError)}`
+              : 'تم الانتهاء من معالجة جميع الرسائل عبر خادم الإرسال.'
           }));
 
-          // Notify parent app of logs to update statistics dashboard real-time
+          // A request-level failure (e.g. gateway not configured) sent nothing: do not record fake history.
+          if (fatalError === 'sms_gateway_not_configured' || fatalError === 'unauthorized' || fatalError === 'not_allowed') {
+            activeCampaignIdRef.current = undefined;
+            return;
+          }
           emitLogs(generatedLogs);
         })();
       } else {

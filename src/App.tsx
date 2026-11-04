@@ -3,11 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Student, MessageTemplate, ScheduledMessage, MessageLog, SchoolStats } from './types';
-import { 
-  DEFAULT_TEMPLATES, 
-} from './data/mockStudents';
+import { DEFAULT_TEMPLATES } from './data/mockStudents';
 
 // Component imports
 import DashboardOverview from './components/DashboardOverview';
@@ -17,99 +15,86 @@ import { summarizeLogs } from './lib/logStatus';
 import TemplatesManager from './components/TemplatesManager';
 import Scheduler from './components/Scheduler';
 import ReportsPanel from './components/ReportsPanel';
-import SmsGatewaySettings from './components/SmsGatewaySettings';
+import SmsGatewaySettings, { GatewayStatus } from './components/SmsGatewaySettings';
 import BackupPanel from './components/BackupPanel';
-import { readArray, readJSON, writeJSON, getQuarantinedKeys } from './lib/storage';
+import { RepoError, SchoolRepository, repoErrorMessage } from './lib/repo/types';
+import { newId } from './lib/repo/mapping';
+import type { ProxyResponse } from './lib/smsProxy';
+import type { AuthUser } from './auth/authService';
+import { UI_PREF_KEYS } from './lib/smsPrefs';
 
 // Icons
 import { 
   LayoutDashboard, 
   MessageSquarePlus, 
   FileSpreadsheet, 
-  Sparkles, 
   BookOpen, 
   Clock, 
   AreaChart, 
   Menu, 
   X, 
   CheckCircle, 
-  Bell, 
   AlertCircle,
   SlidersHorizontal,
-  DatabaseBackup
+  DatabaseBackup,
+  LogOut,
+  Loader2,
+  RefreshCw
 } from 'lucide-react';
 
-export default function App() {
+export interface AppProps {
+  repo: SchoolRepository;
+  user: AuthUser;
+  onSignOut: () => void | Promise<void>;
+  /** Called when a cloud request fails because the session expired / was revoked. */
+  onAuthFailure?: () => void;
+  /** Gateway status probe (defaults to the Edge Function in production wiring). */
+  checkGateway?: () => Promise<ProxyResponse>;
+}
+
+const SEEDED_KEY = (uid: string) => `sn_default_templates_seeded:${uid}`;
+
+export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway }: AppProps) {
   // Navigation / UI States
   const [composerPrefill, setComposerPrefill] = useState<ComposerPrefill | null>(null);
   const [activeTab, setActiveTab] = useState<'overview' | 'compose' | 'importer' | 'templates' | 'scheduler' | 'reports' | 'sms-config' | 'backup'>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
 
-  // School Name state
+  // School name is a non-sensitive UI preference (localStorage).
   const [schoolName, setSchoolName] = useState<string>(() => {
-    return localStorage.getItem('resal_school_name') || 'مدرسة المنارة الثانوية الشاملة';
+    return localStorage.getItem(UI_PREF_KEYS.schoolName) || 'مدرسة المنارة الثانوية الشاملة';
   });
   const [isEditingSchool, setIsEditingSchool] = useState(false);
   const [tempSchoolName, setTempSchoolName] = useState(schoolName);
 
-  const [excelImportedIds, setExcelImportedIds] = useState<string[] | null>(() => {
-    const saved = readJSON<unknown>('resal_temp_excel_match_ids', null);
-    return Array.isArray(saved) ? saved : null;
-  });
+  // Excel-matched targets are kept in memory only (they are student identifiers).
+  const [excelImportedIds, setExcelImportedIds] = useState<string[] | null>(null);
 
   const handleUpdateSchoolName = (newName: string) => {
     setSchoolName(newName);
-    localStorage.setItem('resal_school_name', newName);
+    localStorage.setItem(UI_PREF_KEYS.schoolName, newName);
   };
 
   const handleSelectExcelBatch = (matchedIds: string[]) => {
     setExcelImportedIds(matchedIds);
-    localStorage.setItem('resal_temp_excel_match_ids', JSON.stringify(matchedIds));
     triggerNotification(`نجحت المطابقة! تم تفعيل استهداف (${matchedIds.length}) طالباً. تفضل بكتابة رسالتك الآن بنجاح.`);
     setActiveTab('compose');
   };
 
-  // Persistence state hydration. A fresh install starts EMPTY (no demo students/logs/campaigns);
-  // corrupt values are quarantined (resal_corrupt_*) instead of crashing or being silently lost.
-  const [students, setStudents] = useState<Student[]>(() => readArray<Student>('resal_students', []));
+  // All school data lives in the cloud (school_notify schema). Nothing is read from the old resal_* keys.
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [loadError, setLoadError] = useState<string>('');
+  const [students, setStudents] = useState<Student[]>([]);
+  const [templates, setTemplates] = useState<MessageTemplate[]>([]);
+  const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
+  const [logs, setLogs] = useState<MessageLog[]>([]);
+  const studentsRef = useRef<Student[]>([]);
+  studentsRef.current = students;
 
-  const [templates, setTemplates] = useState<MessageTemplate[]>(() =>
-    readArray<MessageTemplate>('resal_templates', DEFAULT_TEMPLATES)
-  );
-
-  const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>(() =>
-    readArray<ScheduledMessage>('resal_scheduled', [])
-  );
-
-  const [logs, setLogs] = useState<MessageLog[]>(() => readArray<MessageLog>('resal_logs', []));
-
-  const [quarantineNotice, setQuarantineNotice] = useState<string[]>(() => getQuarantinedKeys());
-
-  // Sync state mutations to LocalStorage dynamically
-  useEffect(() => {
-    if (!writeJSON('resal_students', students)) {
-      triggerNotification('تعذّر حفظ البيانات في المتصفح (قد تكون المساحة ممتلئة). خذ نسخة احتياطية الآن.', 'error');
-    }
-  }, [students]);
-
-  useEffect(() => {
-    if (!writeJSON('resal_templates', templates)) {
-      triggerNotification('تعذّر حفظ البيانات في المتصفح (قد تكون المساحة ممتلئة). خذ نسخة احتياطية الآن.', 'error');
-    }
-  }, [templates]);
-
-  useEffect(() => {
-    if (!writeJSON('resal_scheduled', scheduledMessages)) {
-      triggerNotification('تعذّر حفظ البيانات في المتصفح (قد تكون المساحة ممتلئة). خذ نسخة احتياطية الآن.', 'error');
-    }
-  }, [scheduledMessages]);
-
-  useEffect(() => {
-    if (!writeJSON('resal_logs', logs)) {
-      triggerNotification('تعذّر حفظ البيانات في المتصفح (قد تكون المساحة ممتلئة). خذ نسخة احتياطية الآن.', 'error');
-    }
-  }, [logs]);
+  // Connection / gateway status for the sidebar
+  const [online, setOnline] = useState<boolean>(() => (typeof navigator === 'undefined' ? true : navigator.onLine !== false));
+  const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus>('unknown');
 
   // Timed dismiss triggers for notifications
   const triggerNotification = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
@@ -119,86 +104,208 @@ export default function App() {
     }, 4500);
   };
 
-  // 1. Excel Students Import Trigger
-  const handleImportComplete = (imported: Student[]) => {
-    // Merge by student ID to prevent duplicate primary keys
-    setStudents(prev => {
-      const mergedMap = new Map();
-      prev.forEach(s => mergedMap.set(s.id, s));
-      imported.forEach(s => mergedMap.set(s.id, s));
-      return Array.from(mergedMap.values());
+  const reportError = (err: unknown) => {
+    triggerNotification(repoErrorMessage(err), 'error');
+    if (err instanceof RepoError && err.kind === 'auth') onAuthFailure?.();
+  };
+
+  const loadAll = useCallback(async () => {
+    setLoadState('loading');
+    try {
+      const data = await repo.loadAll();
+      let tmpl = data.templates;
+      // First sign-in on this account: seed the generic default templates once (no student data).
+      if (tmpl.length === 0 && !localStorage.getItem(SEEDED_KEY(user.id))) {
+        const seeded = DEFAULT_TEMPLATES.map(t => ({ ...t, id: newId() }));
+        try {
+          await repo.upsertTemplates(seeded);
+          tmpl = seeded;
+          localStorage.setItem(SEEDED_KEY(user.id), '1');
+        } catch {
+          /* non-fatal */
+        }
+      }
+      setStudents(data.students);
+      setTemplates(tmpl);
+      setScheduledMessages(data.campaigns.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)));
+      setLogs(data.logs);
+      setLoadState('ready');
+    } catch (err) {
+      setLoadError(repoErrorMessage(err));
+      setLoadState('error');
+      if (err instanceof RepoError && err.kind === 'auth') onAuthFailure?.();
+    }
+  }, [repo, user.id, onAuthFailure]);
+
+  const refreshGatewayStatus = useCallback(async () => {
+    if (!checkGateway) return;
+    setGatewayStatus('checking');
+    try {
+      const res = await checkGateway();
+      if ('error' in res) setGatewayStatus(res.error === 'offline' ? 'offline' : res.error === 'sms_gateway_not_configured' ? 'not_configured' : 'error');
+      else setGatewayStatus(res.configured ? 'configured' : 'not_configured');
+    } catch {
+      setGatewayStatus('error');
+    }
+  }, [checkGateway]);
+
+  useEffect(() => {
+    void loadAll();
+  }, [loadAll]);
+
+  useEffect(() => {
+    void refreshGatewayStatus();
+  }, [refreshGatewayStatus]);
+
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => {
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
+    };
+  }, []);
+
+  // 1. Excel Students Import Trigger (upsert by national id, chunks of 500)
+  const handleImportComplete = async (imported: Student[]) => {
+    try {
+      const written = await repo.upsertStudents(imported);
+      setStudents(prev => {
+        const mergedMap = new Map<string, Student>();
+        prev.forEach(s => mergedMap.set(s.id, s));
+        imported.forEach(s => mergedMap.set(String(s.id).trim(), { ...s, id: String(s.id).trim() }));
+        return Array.from(mergedMap.values());
+      });
+      triggerNotification(`تم حفظ (${written}) سجل طالب في السحابة بنجاح.`);
+      setActiveTab('overview');
+    } catch (err) {
+      reportError(err);
+    }
+  };
+
+  // Student edits/deletes coming from the dashboard (computes the diff and persists it).
+  const handleUpdateStudents = (action: React.SetStateAction<Student[]>) => {
+    const current = studentsRef.current;
+    const next = typeof action === 'function' ? (action as (p: Student[]) => Student[])(current) : action;
+    const nextIds = new Set(next.map(s => s.id));
+    const removed = current.filter(s => !nextIds.has(s.id)).map(s => s.id);
+    const currentById = new Map(current.map(s => [s.id, s]));
+    const changed = next.filter(s => {
+      const old = currentById.get(s.id);
+      return !old || JSON.stringify(old) !== JSON.stringify(s);
     });
-    
-    triggerNotification(`تم استيراد عدد (${imported.length}) سجلات طلاب بنجاح وتصنيف شعبهم الفئوية.`);
-    setActiveTab('overview');
+    (async () => {
+      try {
+        if (next.length === 0 && current.length > 0) await repo.deleteAllStudents();
+        else if (removed.length) await repo.deleteStudents(removed);
+        if (changed.length) await repo.upsertStudents(changed);
+        setStudents(next);
+      } catch (err) {
+        reportError(err);
+      }
+    })();
   };
 
   // 2. Add Saved Template Trigger
-  const handleAddTemplate = (newTmpl: Omit<MessageTemplate, 'id'>) => {
-    const nextId = 'TMP' + Math.floor(100 + Math.random() * 900);
-    const templateWithId: MessageTemplate = {
-      ...newTmpl,
-      id: nextId
-    };
-
-    setTemplates(prev => [templateWithId, ...prev]);
-    triggerNotification(`تم حفظ قالب الرسالة الجديد "${newTmpl.title}" في بنك النصوص التلقائية.`);
+  const handleAddTemplate = async (newTmpl: Omit<MessageTemplate, 'id'>) => {
+    const templateWithId: MessageTemplate = { ...newTmpl, id: newId() };
+    try {
+      await repo.upsertTemplates([templateWithId]);
+      setTemplates(prev => [templateWithId, ...prev]);
+      triggerNotification(`تم حفظ قالب الرسالة الجديد "${newTmpl.title}" في بنك النصوص التلقائية.`);
+    } catch (err) {
+      reportError(err);
+    }
   };
 
   // 3. Edit/Modify existing template
-  const handleUpdateTemplate = (updated: MessageTemplate) => {
-    setTemplates(prev => prev.map(t => t.id === updated.id ? updated : t));
-    triggerNotification(`تم تحديث صياغة القالب "${updated.title}" بنجاح.`);
+  const handleUpdateTemplate = async (updated: MessageTemplate) => {
+    try {
+      await repo.upsertTemplates([updated]);
+      setTemplates(prev => prev.map(t => t.id === updated.id ? updated : t));
+      triggerNotification(`تم تحديث صياغة القالب "${updated.title}" بنجاح.`);
+    } catch (err) {
+      reportError(err);
+    }
   };
 
   // 4. Delete existing template
-  const handleDeleteTemplate = (id: string) => {
+  const handleDeleteTemplate = async (id: string) => {
     const target = templates.find(t => t.id === id);
-    setTemplates(prev => prev.filter(t => t.id !== id));
-    triggerNotification(`تم حذف القالب "${target?.title || id}" من القائمة.`, 'info');
+    try {
+      await repo.deleteTemplate(id);
+      setTemplates(prev => prev.filter(t => t.id !== id));
+      triggerNotification(`تم حذف القالب "${target?.title || ''}" من القائمة.`, 'info');
+    } catch (err) {
+      reportError(err);
+    }
   };
 
   // 5. Send Immediate Message Trigger (Evaluated and sent directly)
-  const handleSendImmediate = (generatedLogs: MessageLog[]) => {
-    setLogs(prev => [...generatedLogs, ...prev]);
+  const handleSendImmediate = async (generatedLogs: MessageLog[]) => {
     const summary = summarizeLogs(generatedLogs);
     // A scheduled campaign is completed only when real messages for it were actually handed over
     const campaignIds = new Set(
       generatedLogs.filter(l => l.campaignId && (l.status === 'sent' || l.status === 'delivered')).map(l => l.campaignId as string)
     );
+    let stored = generatedLogs;
+    try {
+      stored = await repo.addLogs(generatedLogs);
+      const toComplete = scheduledMessages
+        .filter(item => campaignIds.has(item.id) && item.status === 'pending')
+        .map(item => ({ ...item, status: 'completed' as const }));
+      if (toComplete.length) await repo.upsertCampaigns(toComplete);
+      triggerNotification(
+        `تم تسليم (${summary.successful}) رسالة للإرسال${summary.failed ? ` وفشلت (${summary.failed})` : ''}. ملاحظة: «أُرسلت» لا تعني تأكيد الاستلام على هاتف ولي الأمر.`,
+        summary.failed ? 'info' : 'success'
+      );
+    } catch (err) {
+      // Messages may already be sent: keep them visible in this session and tell the user saving failed.
+      triggerNotification('تمت معالجة الإرسال لكن تعذر حفظ سجل الرسائل في السحابة.', 'error');
+      if (err instanceof RepoError && err.kind === 'auth') onAuthFailure?.();
+    }
+    setLogs(prev => [...stored, ...prev]);
     if (campaignIds.size > 0) {
       setScheduledMessages(prev =>
         prev.map(item => campaignIds.has(item.id) && item.status === 'pending' ? { ...item, status: 'completed' as const } : item)
       );
     }
-    triggerNotification(
-      `تم تسليم (${summary.successful}) رسالة للإرسال${summary.failed ? ` وفشلت (${summary.failed})` : ''}. ملاحظة: «أُرسلت» لا تعني تأكيد الاستلام على هاتف ولي الأمر.`,
-      summary.failed ? 'info' : 'success'
-    );
     setActiveTab('reports');
   };
 
   // 6. Schedule Campaign for date/time
-  const handleScheduleMessage = (newSchedule: Omit<ScheduledMessage, 'id' | 'createdAt' | 'status'>) => {
-    const nextId = 'SCH' + Math.floor(100 + Math.random() * 900);
+  const handleScheduleMessage = async (newSchedule: Omit<ScheduledMessage, 'id' | 'createdAt' | 'status'>) => {
     const scheduledWithId: ScheduledMessage = {
       ...newSchedule,
-      id: nextId,
+      id: newId(),
       createdAt: new Date().toISOString(),
       status: 'pending'
     };
-
-    setScheduledMessages(prev => [scheduledWithId, ...prev]);
-    triggerNotification(`تمت جدولة حملة "${newSchedule.title}" بنجاح ليوم ${newSchedule.scheduledTime.split('T')[0]}.`);
-    setActiveTab('scheduler');
+    try {
+      await repo.upsertCampaigns([scheduledWithId]);
+      setScheduledMessages(prev => [scheduledWithId, ...prev]);
+      triggerNotification(`تمت جدولة حملة "${newSchedule.title}" بنجاح ليوم ${newSchedule.scheduledTime.split('T')[0]}.`);
+      setActiveTab('scheduler');
+    } catch (err) {
+      reportError(err);
+    }
   };
 
   // 7. Cancel Scheduled Message
-  const handleCancelSchedule = (id: string) => {
-    setScheduledMessages(prev => 
-      prev.map(item => item.id === id ? { ...item, status: 'cancelled' as const } : item)
-    );
-    triggerNotification(`تم إلغاء جدولة الحملة ونقلها للأرشيف غير النشط.`, 'info');
+  const handleCancelSchedule = async (id: string) => {
+    const target = scheduledMessages.find(item => item.id === id);
+    if (!target) return;
+    try {
+      await repo.upsertCampaigns([{ ...target, status: 'cancelled' }]);
+      setScheduledMessages(prev => 
+        prev.map(item => item.id === id ? { ...item, status: 'cancelled' as const } : item)
+      );
+      triggerNotification(`تم إلغاء جدولة الحملة ونقلها للأرشيف غير النشط.`, 'info');
+    } catch (err) {
+      reportError(err);
+    }
   };
 
   // 8. Bypass scheduler and dispatch immediately
@@ -230,10 +337,41 @@ export default function App() {
     triggerNotification(`تم تحميل الحملة في شاشة الإرسال (${targets.length} طالب). راجعها ثم أكّد الإرسال.`, 'info');
   };
 
-  const handleClearLogs = () => {
-    setLogs([]);
-    triggerNotification(`تم مسح تقارير الإرسال والاتصال تماماً.`, 'info');
+  const handleClearLogs = async () => {
+    try {
+      await repo.clearLogs();
+      setLogs([]);
+      triggerNotification(`تم مسح تقارير الإرسال والاتصال تماماً.`, 'info');
+    } catch (err) {
+      reportError(err);
+    }
   };
+
+  if (loadState !== 'ready') {
+    return (
+      <div dir="rtl" className="min-h-screen flex items-center justify-center bg-slate-50 p-6" id="app-loading">
+        {loadState === 'loading' ? (
+          <div className="flex items-center gap-2 text-sm text-slate-600">
+            <Loader2 className="w-5 h-5 animate-spin text-indigo-600" />
+            جاري تحميل البيانات من السحابة...
+          </div>
+        ) : (
+          <div className="max-w-md text-center space-y-3 bg-white border border-rose-200 rounded-2xl p-6" id="app-load-error">
+            <AlertCircle className="w-8 h-8 mx-auto text-rose-600" />
+            <p className="text-sm text-slate-700">{loadError}</p>
+            <div className="flex justify-center gap-2">
+              <button type="button" onClick={() => void loadAll()} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-bold flex items-center gap-1">
+                <RefreshCw className="w-4 h-4" /> إعادة المحاولة
+              </button>
+              <button type="button" onClick={() => void onSignOut()} className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 text-xs font-bold" id="logout-button-error">
+                تسجيل الخروج
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   // Compute school stats
   const distinctGrades = Array.from(new Set(students.map(s => s.grade)));
@@ -266,14 +404,6 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row text-right" dir="rtl" id="resal-app-root">
       
-      {quarantineNotice.length > 0 && (
-        <div id="storage-quarantine-notice" className="fixed top-3 left-1/2 -translate-x-1/2 z-50 max-w-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs rounded-xl p-3 shadow-lg">
-          <p className="font-bold">تم العثور على بيانات تالفة في المتصفح ولم يتم حذفها.</p>
-          <p className="mt-1">حُفظت نسخة من القيمة الأصلية باسم: <span dir="ltr" className="font-mono">{quarantineNotice.join(', ')}</span> — وتم تحميل قائمة فارغة بدلاً منها. خذ نسخة احتياطية قبل أي تعديل.</p>
-          <button type="button" className="mt-2 underline" onClick={() => setQuarantineNotice([])}>إخفاء</button>
-        </div>
-      )}
-
       {/* Toast Notification Banner popup */}
       {notification && (
         <div 
@@ -414,10 +544,31 @@ export default function App() {
               </button>
             </div>
           )}
-          <div className="text-[10px] text-slate-400 font-mono">تحديث البيانات: 2026-05-29</div>
-          <div className="text-emerald-500 font-sans text-[10px] flex items-center gap-1.5 font-bold">
-            <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping" />
-            <span>الجهاز متصل بالبوابة</span>
+          <div className="space-y-1" id="sidebar-connection-status">
+            <div className={`font-sans text-[10px] flex items-center gap-1.5 font-bold ${online ? 'text-emerald-500' : 'text-rose-400'}`} data-status={online ? 'online' : 'offline'} id="sidebar-cloud-status">
+              <span className={`w-1.5 h-1.5 rounded-full ${online ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+              <span>{online ? 'متصل بالسحابة (تم تسجيل الدخول)' : 'غير متصل بالإنترنت — لن تُحفظ التغييرات'}</span>
+            </div>
+            <div className={`font-sans text-[10px] flex items-center gap-1.5 font-bold ${
+              gatewayStatus === 'configured' ? 'text-emerald-500' : gatewayStatus === 'not_configured' ? 'text-amber-400' : gatewayStatus === 'checking' || gatewayStatus === 'unknown' ? 'text-slate-400' : 'text-rose-400'
+            }`} data-status={gatewayStatus} id="sidebar-gateway-status">
+              <span className={`w-1.5 h-1.5 rounded-full ${
+                gatewayStatus === 'configured' ? 'bg-emerald-500' : gatewayStatus === 'not_configured' ? 'bg-amber-400' : gatewayStatus === 'checking' || gatewayStatus === 'unknown' ? 'bg-slate-500' : 'bg-rose-500'
+              }`} />
+              <span>{GATEWAY_STATUS_LABELS[gatewayStatus]}</span>
+            </div>
+          </div>
+          <div className="flex items-center justify-between gap-2 pt-2">
+            <span className="text-[10px] text-slate-400 truncate" dir="ltr" title={user.email || ''}>{user.email}</span>
+            <button
+              type="button"
+              onClick={() => void onSignOut()}
+              className="flex items-center gap-1 text-[10px] font-bold text-slate-300 hover:text-white bg-slate-800 hover:bg-rose-700 px-2 py-1 rounded-md cursor-pointer transition"
+              id="logout-button"
+            >
+              <LogOut className="w-3 h-3" />
+              تسجيل الخروج
+            </button>
           </div>
         </div>
       </aside>
@@ -441,7 +592,7 @@ export default function App() {
               stats={stats} 
               onNavigateToTab={(tab) => setActiveTab(tab)} 
               students={students}
-              onUpdateStudents={setStudents}
+              onUpdateStudents={handleUpdateStudents}
               schoolName={schoolName}
               onUpdateSchoolName={handleUpdateSchoolName}
             />
@@ -458,16 +609,13 @@ export default function App() {
               schoolName={schoolName}
               onUpdateSchoolName={handleUpdateSchoolName}
               excelImportedIds={excelImportedIds}
-              onClearImportedIds={() => {
-                setExcelImportedIds(null);
-                localStorage.removeItem('resal_temp_excel_match_ids');
-              }}
+              onClearImportedIds={() => setExcelImportedIds(null)}
               onAddTemplate={handleAddTemplate}
             />
           )}
 
           {activeTab === 'sms-config' && (
-            <SmsGatewaySettings schoolName={schoolName} />
+            <SmsGatewaySettings schoolName={schoolName} gatewayStatus={gatewayStatus} onRefreshStatus={refreshGatewayStatus} />
           )}
 
           {activeTab === 'importer' && (
@@ -497,7 +645,11 @@ export default function App() {
           )}
 
           {activeTab === 'backup' && (
-            <BackupPanel />
+            <BackupPanel
+              data={{ students, templates, campaigns: scheduledMessages, logs }}
+              repo={repo}
+              onRestored={loadAll}
+            />
           )}
 
           {activeTab === 'reports' && (
@@ -513,3 +665,12 @@ export default function App() {
     </div>
   );
 }
+
+const GATEWAY_STATUS_LABELS: Record<GatewayStatus, string> = {
+  unknown: 'جاري فحص بوابة SMS...',
+  checking: 'جاري فحص بوابة SMS...',
+  configured: 'خادم الإرسال جاهز (SMSGate مهيأة)',
+  not_configured: 'بوابة SMS غير مهيأة بعد',
+  offline: 'تعذر الوصول إلى خادم الإرسال',
+  error: 'تعذر فحص بوابة SMS',
+};

@@ -1,8 +1,9 @@
 # SchoolNotify (رسال)
 
-A browser-only school messaging app (Arabic, RTL) for sending notices to parents and students:
+A school messaging app (Arabic, RTL) for sending notices to parents and students:
 Excel import of class lists, message templates with variables, recipient selection with a
-pre-send confirmation, manual WhatsApp/SMS sending, reports, and backup/restore.
+pre-send confirmation, cloud SMS (via a Supabase Edge Function) or manual WhatsApp/SMS sending,
+reports, and backup/restore. Login required; data is stored in Supabase with Row Level Security.
 
 **Live site:** https://mhzcis.github.io/School-notify/
 
@@ -11,7 +12,7 @@ pre-send confirmation, manual WhatsApp/SMS sending, reports, and backup/restore.
 The site is a static Vite + React build hosted on **GitHub Pages**.
 
 - Every push to `main` runs `.github/workflows/deploy.yml`:
-  `npm ci` → `npm test` → `npm run build` → upload `dist/` → deploy to Pages.
+  `npm ci` → `npm run lint` → `npm test` → `npm run build` → upload `dist/` → deploy to Pages.
 - Pages source is set to **GitHub Actions** (Settings → Pages).
 - `vite.config.ts` sets `base` to `/School-notify/` (the Pages project sub-path).
   Override with `VITE_BASE=/` at build time if the site is ever served from a domain root.
@@ -20,6 +21,7 @@ Local development:
 
 ```bash
 npm ci
+cp .env.example .env.local   # fill in the PUBLIC project URL + publishable key
 npm run dev       # dev server
 npm test          # unit tests (vitest)
 npm run lint      # type check
@@ -27,36 +29,46 @@ npm run build     # production build into dist/
 npm run preview   # serve the production build locally
 ```
 
-## Data model: localStorage only
+The build reads `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`. In CI they come from the
+repository **variables** (`vars.*`). Only the publishable key is ever used in the browser — never a
+service-role / secret key.
 
-There is **no backend and no database**. All data (students, templates, logs, scheduled
-campaigns, settings) lives in the browser's `localStorage` under keys prefixed `resal_`.
+## Login
 
-- Data is per browser and per origin. Another browser, device, or domain starts empty.
-- Clearing site data deletes everything. Use the built-in **backup/export** regularly.
-- Corrupt stored values are quarantined (`resal_corrupt_<key>_<stamp>`) instead of crashing the app.
-- Moodle default usernames/passwords imported from Excel are stored in plain text in
-  `localStorage` (masked in the UI).
+The whole app is behind a Supabase Auth email + password login (no sign-up, no password reset in
+the UI). After sign-in the app calls `school_notify.is_allowed()`; accounts that are not on the
+allow-list (`school_notify.allowed_users`, managed by the owner in the dashboard) are signed out
+immediately. Nothing is rendered or fetched before both checks pass.
 
-## SMS sending on GitHub Pages
+## Data model: Supabase (`school_notify` schema)
 
-| Mode | Works on Pages? | Notes |
-|---|---|---|
-| Manual WhatsApp / `sms:` links (one by one) | ✅ Yes | Opens each message for the user to send. |
-| SMSGate **cloud** (`api.sms-gate.app`) | ❌ Not yet | The SMSGate API does not allow browser (CORS) calls; it needs a server-side proxy. |
-| "School SMS helper" Android app (server queue) | ❌ Not yet | Needs a server to hold the queue. |
-| SMSGate **local** (`http://<phone-ip>:8080`) | ❌ From https | Browsers block http calls from an https page (mixed content). Works only if the app is opened over plain http on the same LAN (e.g. `npm run preview -- --host`). |
+Students, templates, campaigns and message logs are stored in the `school_notify` schema of the
+Supabase project, protected by Row Level Security (`owner = auth.uid()` **and** `is_allowed()`).
+The anonymous role has no access to the schema at all. Students are unique per owner by national ID
+(`students(owner, national_id)`), so re-importing an Excel sheet updates instead of duplicating;
+imports are written in batches of 500.
 
-The UI shows a clear notice and refuses to start a gateway broadcast when the selected mode
-cannot work from this deployment.
+`localStorage` only holds non-sensitive UI preferences (`sn_*` keys: school name, send mode,
+segment price). The data of the old browser-only version (`resal_*` keys) is **ignored**: it is not
+read, migrated or deleted.
 
-**Credentials:** SMSGate usernames/passwords entered in the settings are stored in the
-browser's `localStorage` (plain text) until a server-side proxy exists. A Supabase Edge
-Function proxy is planned; it will keep gateway credentials as server secrets. Until then,
-use this app only on a trusted, personal browser profile.
+Backup (Settings → backup): JSON export of the cloud data (Moodle passwords excluded unless
+explicitly included), Excel export of students, and restore with a typed confirmation (restore
+merges/updates — it never deletes cloud rows).
 
-Scheduled campaigns are **not** sent automatically (there is no scheduler); use "send now"
-to load and send them manually with confirmation.
+## SMS sending
+
+Automatic sending goes through the Edge Function `school-notify-sms`
+(`supabase/functions/school-notify-sms`): JWT required, re-checks `is_allowed()` for the caller,
+validates input (max 50 recipients per call, E.164 phones), CORS limited to
+`https://mhzcis.github.io` and localhost, and forwards to SMSGate cloud
+(`https://api.sms-gate.app/3rdparty/v1/message`) with Basic auth from the function secrets
+`SMSGATE_USERNAME` / `SMSGATE_PASSWORD`. Until the owner sets those secrets (Supabase dashboard →
+Edge Functions → Secrets) the function answers "SMS gateway not configured" and the UI shows an
+Arabic notice. Phone numbers, message bodies and credentials are never logged.
+
+The manual WhatsApp/SMS queue (one-by-one, opened on the teacher's device) still works without the
+gateway.
 
 ## Not included
 

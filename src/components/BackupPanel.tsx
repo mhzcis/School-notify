@@ -1,13 +1,24 @@
 /**
- * Backup export / restore screen.
- * Restore flow: choose file -> validate -> show summary + confirm ->
- * automatically download a pre-restore backup of the CURRENT data -> write -> reload.
+ * Backup export / restore screen (cloud data).
+ * Restore flow: choose file -> validate -> show summary + typed confirmation ->
+ * automatically download a safety backup of the CURRENT cloud data -> merge-upsert -> reload data.
  */
 import React, { useRef, useState } from 'react';
-import { Download, Upload, ShieldAlert, CheckCircle2, AlertCircle, DatabaseBackup } from 'lucide-react';
-import { applyBackup, backupFilename, createBackup, downloadJson, validateBackup, BackupFile, BackupSummary } from '../lib/backup';
+import * as XLSX from 'xlsx';
+import { Download, Upload, ShieldAlert, CheckCircle2, AlertCircle, DatabaseBackup, FileSpreadsheet } from 'lucide-react';
+import {
+  applyBackup, backupFilename, createBackup, downloadJson, studentsWorkbook, validateBackup, BackupFile, BackupSummary
+} from '../lib/backup';
+import { AppData, SchoolRepository, repoErrorMessage } from '../lib/repo/types';
 
-export default function BackupPanel() {
+interface BackupPanelProps {
+  data: AppData;
+  repo: SchoolRepository;
+  onRestored: () => void | Promise<void>;
+}
+
+export default function BackupPanel({ data, repo, onRestored }: BackupPanelProps) {
+  const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const [includeSecrets, setIncludeSecrets] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -16,9 +27,15 @@ export default function BackupPanel() {
   const [confirmText, setConfirmText] = useState('');
 
   const handleExport = () => {
-    const backup = createBackup(localStorage, { includeCredentials: includeSecrets, origin: window.location.origin });
+    const backup = createBackup(data, { includeSecrets });
     downloadJson(backup, backupFilename());
-    setMessage(`تم تنزيل النسخة الاحتياطية (${Object.keys(backup.data).length} مفتاح).`);
+    setMessage(`تم تنزيل النسخة الاحتياطية (${data.students.length} طالب، ${data.templates.length} قالب، ${data.campaigns.length} حملة، ${data.logs.length} سجل).`);
+  };
+
+  const handleExportExcel = () => {
+    const wb = studentsWorkbook(data.students, includeSecrets);
+    XLSX.writeFile(wb, backupFilename(new Date(), 'students', 'xlsx'));
+    setMessage(`تم تنزيل كشف الطلاب (${data.students.length}) بصيغة Excel.`);
   };
 
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -42,19 +59,24 @@ export default function BackupPanel() {
     reader.readAsText(file);
   };
 
-  const handleConfirmRestore = () => {
-    if (!pending) return;
+  const handleConfirmRestore = async () => {
+    if (!pending || busy) return;
+    setBusy(true);
+    setErrors([]);
     try {
-      // 1) Safety copy of the CURRENT data (complete, including secrets so nothing is lost).
-      const safety = createBackup(localStorage, { includeCredentials: true, origin: window.location.origin });
+      // 1) Safety copy of the CURRENT cloud data (complete, including secrets so nothing is lost).
+      const safety = createBackup(data, { includeSecrets: true });
       downloadJson(safety, backupFilename(new Date(), 'pre-restore'));
-      // 2) Write the backup.
-      applyBackup(pending.backup);
-      setMessage('تمت الاستعادة بنجاح. سيتم إعادة تحميل الصفحة...');
+      // 2) Merge the backup into the cloud.
+      await applyBackup(pending.backup, repo, data.students);
       setPending(null);
-      setTimeout(() => window.location.reload(), 1200);
-    } catch (err: any) {
-      setErrors([`فشلت الاستعادة: ${err?.message || err}`]);
+      setConfirmText('');
+      setMessage('تمت الاستعادة إلى السحابة بنجاح.');
+      await onRestored();
+    } catch (err) {
+      setErrors([`فشلت الاستعادة: ${repoErrorMessage(err)}`]);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -66,7 +88,7 @@ export default function BackupPanel() {
           النسخ الاحتياطي والاستعادة
         </h2>
         <p className="text-sm text-slate-500 mt-1">
-          كل البيانات محفوظة داخل هذا المتصفح فقط (localStorage). احفظ نسخة احتياطية دورية في ملف على جهازك.
+          البيانات محفوظة في السحابة ضمن حسابك المحمي. يمكنك تنزيل نسخة احتياطية في ملف على جهازك واستعادتها لاحقاً.
         </p>
       </div>
 
@@ -76,7 +98,7 @@ export default function BackupPanel() {
         <label className="flex items-start gap-2 text-xs text-slate-600 cursor-pointer">
           <input type="checkbox" checked={includeSecrets} onChange={e => setIncludeSecrets(e.target.checked)} className="mt-0.5" />
           <span>
-            تضمين البيانات الحساسة (بيانات دخول بوابة الرسائل وكلمات مرور Moodle للطلاب)
+            تضمين البيانات الحساسة (كلمات مرور Moodle للطلاب)
           </span>
         </label>
         {includeSecrets && (
@@ -93,13 +115,21 @@ export default function BackupPanel() {
           <Download className="w-4 h-4" />
           تنزيل نسخة احتياطية (JSON)
         </button>
+        <button
+          onClick={handleExportExcel}
+          className="px-4 py-2 bg-white border border-emerald-600 text-emerald-700 hover:bg-emerald-50 text-xs font-bold rounded-lg flex items-center gap-2 cursor-pointer"
+          id="btn-export-excel"
+        >
+          <FileSpreadsheet className="w-4 h-4" />
+          تنزيل كشف الطلاب (Excel)
+        </button>
       </section>
 
       {/* Restore */}
       <section className="space-y-3 pt-4 border-t border-slate-100">
         <h3 className="font-bold text-slate-700 text-sm">استعادة من نسخة احتياطية</h3>
         <p className="text-xs text-slate-500">
-          قبل الاستعادة سيتم تنزيل نسخة أمان تلقائية من بياناتك الحالية، ثم ستستبدل البيانات الموجودة في الملف البيانات الحالية.
+          قبل الاستعادة سيتم تنزيل نسخة أمان تلقائية من بياناتك الحالية، ثم تُدمج بيانات الملف في السحابة (تُحدَّث السجلات المطابقة ولا يُحذف أي سجل موجود).
         </p>
         <input ref={fileRef} type="file" accept="application/json,.json" onChange={handleFile} className="text-xs" id="input-restore-backup" />
 
@@ -110,10 +140,9 @@ export default function BackupPanel() {
             </div>
             <ul className="list-disc pr-5 space-y-0.5">
               <li>تاريخ التصدير: <span dir="ltr">{pending.summary.exportedAt || 'غير معروف'}</span></li>
-              <li>الطلاب: {pending.summary.students} • القوالب: {pending.summary.templates} • الحملات: {pending.summary.scheduled} • السجلات: {pending.summary.logs}</li>
-              <li>عدد المفاتيح: {pending.summary.keys.length}</li>
-              {!pending.summary.credentialsIncluded && (
-                <li className="text-amber-700">هذه النسخة لا تحتوي كلمات المرور؛ بعد الاستعادة ستكون كلمات المرور فارغة ويجب إدخالها من جديد.</li>
+              <li>الطلاب: {pending.summary.students} • القوالب: {pending.summary.templates} • الحملات: {pending.summary.campaigns} • السجلات: {pending.summary.logs}</li>
+              {!pending.summary.secretsIncluded && (
+                <li className="text-amber-700">هذه النسخة لا تحتوي كلمات مرور Moodle؛ تبقى كلمات المرور المحفوظة حالياً كما هي.</li>
               )}
             </ul>
             <p>للتأكيد اكتب كلمة <strong>استعادة</strong>:</p>
@@ -125,12 +154,12 @@ export default function BackupPanel() {
             />
             <div className="flex gap-2 pt-1">
               <button
-                disabled={confirmText.trim() !== 'استعادة'}
-                onClick={handleConfirmRestore}
+                disabled={busy || confirmText.trim() !== 'استعادة'}
+                onClick={() => void handleConfirmRestore()}
                 className="px-3 py-1.5 bg-rose-600 disabled:opacity-40 text-white font-bold rounded-lg flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
                 id="btn-confirm-restore"
               >
-                <Upload className="w-4 h-4" /> تنزيل نسخة أمان ثم الاستعادة
+                <Upload className="w-4 h-4" /> {busy ? 'جاري الاستعادة...' : 'تنزيل نسخة أمان ثم الاستعادة'}
               </button>
               <button onClick={() => setPending(null)} className="px-3 py-1.5 border border-slate-300 rounded-lg cursor-pointer">
                 إلغاء

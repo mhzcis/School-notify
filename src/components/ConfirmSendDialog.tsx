@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Send, X } from 'lucide-react';
 import SecretText from './SecretText';
 import { estimateCampaign, segmentInfo } from '../lib/sms';
-import { STORAGE_KEYS } from '../lib/storageKeys';
+import { UI_PREF_KEYS } from '../lib/smsPrefs';
 
 export interface ConfirmSendDialogProps {
   open: boolean;
@@ -32,11 +32,11 @@ export interface ConfirmSendDialogProps {
 export default function ConfirmSendDialog(props: ConfirmSendDialogProps) {
   const { open, mode, studentCount, contents, excludedCount, sampleText, sampleMaskedText, missingMoodleCount = 0, sampleRecipientLabel, scheduledLabel, onConfirm, onCancel } = props;
   const [price, setPrice] = useState<string>(() => {
-    try { return localStorage.getItem(STORAGE_KEYS.smsSegmentPrice) || ''; } catch { return ''; }
+    try { return localStorage.getItem(UI_PREF_KEYS.smsSegmentPrice) || ''; } catch { return ''; }
   });
 
   useEffect(() => {
-    try { localStorage.setItem(STORAGE_KEYS.smsSegmentPrice, price); } catch { /* ignore */ }
+    try { localStorage.setItem(UI_PREF_KEYS.smsSegmentPrice, price); } catch { /* ignore */ }
   }, [price]);
 
   const priceNum = price.trim() === '' ? null : Number(price);
