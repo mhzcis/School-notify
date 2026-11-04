@@ -1,3 +1,4 @@
+import { buildSendBody } from './encryption.ts';
 /**
  * SMSGate cloud API calls (pure: fetch is injected so this runs in Deno and in vitest).
  * Based on the SMSGate OpenAPI spec (https://api.sms-gate.app/docs/doc.json):
@@ -43,13 +44,25 @@ async function withTimeout<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<
   }
 }
 
-export async function sendOne(item: SmsItem, auth: string, f: FetchLike): Promise<ItemResult & { authFailed?: boolean }> {
+export async function sendOne(
+  item: SmsItem,
+  auth: string,
+  f: FetchLike,
+  passphrase?: string
+): Promise<ItemResult & { authFailed?: boolean }> {
+  let body: string;
+  try {
+    body = JSON.stringify(await buildSendBody(item.text, item.phone, passphrase));
+  } catch {
+    // Fail closed: never fall back to plaintext when encryption is configured.
+    return { id: item.id, ok: false, error: 'encryption_failed' };
+  }
   try {
     return await withTimeout(async signal => {
       const res = await f(SMSGATE_SEND_URL, {
         method: 'POST',
         headers: { Authorization: auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ textMessage: { text: item.text }, phoneNumbers: [item.phone] }),
+        body,
         signal,
       });
       if (res.status === 401 || res.status === 403) {

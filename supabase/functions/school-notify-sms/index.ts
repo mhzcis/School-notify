@@ -99,8 +99,11 @@ Deno.serve(async (req: Request) => {
   const user = Deno.env.get('SMSGATE_USERNAME') ?? '';
   const pass = Deno.env.get('SMSGATE_PASSWORD') ?? '';
   const configured = !!user && !!pass;
+  // Optional SMSGate passphrase E2E encryption: automatic when the secret is set. Never logged.
+  const passphrase = Deno.env.get('SMSGATE_ENCRYPTION_PASSPHRASE') || undefined;
+  const encrypted = !!passphrase;
 
-  if (v.value.action === 'status') return json(200, { ok: true, configured }, origin);
+  if (v.value.action === 'status') return json(200, { ok: true, configured, encrypted }, origin);
 
   if (!configured) {
     return json(503, { ok: false, error: 'sms_gateway_not_configured', message: 'SMS gateway not configured' }, origin);
@@ -122,7 +125,7 @@ Deno.serve(async (req: Request) => {
       results.push({ id: item.id, ok: false, error: 'gateway_auth_failed' });
       continue;
     }
-    const r = await sendOne(item, auth, fetch);
+    const r = await sendOne(item, auth, fetch, passphrase);
     if (r.authFailed) authFailed = true;
     results.push({ id: r.id, ok: r.ok, error: r.error, gatewayMessageId: r.gatewayMessageId });
   }

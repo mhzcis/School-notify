@@ -17,7 +17,7 @@ export interface ProxyItemResult {
 }
 
 export type ProxyResponse =
-  | { ok: true; configured?: boolean; results?: ProxyItemResult[] }
+  | { ok: true; configured?: boolean; /** SMSGate passphrase encryption active (server secret set). */ encrypted?: boolean; results?: ProxyItemResult[] }
   | { ok: false; error: string; httpStatus?: number };
 
 export type ProxyInvoker = (body: unknown) => Promise<ProxyResponse>;
@@ -291,6 +291,8 @@ export function proxyErrorMessage(code: string | undefined): string {
     case 'gateway_timeout':
     case 'gateway_unreachable':
       return 'تعذر الاتصال ببوابة SMSGate. حاول لاحقاً.';
+    case 'encryption_failed':
+      return 'تعذر تشفير الرسالة؛ لم تُرسل (لا يتم الإرسال بدون تشفير عند تفعيله).';
     case 'gateway_rejected':
       return 'رفضت بوابة SMSGate الرسالة.';
     case 'client_not_configured':
