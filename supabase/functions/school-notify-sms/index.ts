@@ -2,14 +2,13 @@
 //
 // * verify_jwt = true (the platform rejects calls without a valid user JWT).
 // * Re-checks school_notify.is_allowed() with the CALLER's JWT (RLS-style allow-list).
+// * action 'messageStatus': reads per-message state from SMSGate (GET /3rdparty/v1/messages/{id}).
 // * Forwards each message to SMSGate cloud with Basic auth from the function secrets
 //   SMSGATE_USERNAME / SMSGATE_PASSWORD (set by the owner in the dashboard; never in code).
 // * CORS: https://mhzcis.github.io and http://localhost only.
 // * Never logs phone numbers, message bodies or credentials.
-import { MAX_REQUEST_BYTES, isAllowedOrigin, validateProxyRequest, type SmsItem } from './validate.ts';
-
-const SMSGATE_URL = 'https://api.sms-gate.app/3rdparty/v1/message';
-const GATEWAY_TIMEOUT_MS = 15_000;
+import { sendOne, statusMany, type ItemResult } from './gateway.ts';
+import { MAX_REQUEST_BYTES, isAllowedOrigin, validateProxyRequest } from './validate.ts';
 
 function corsHeaders(origin: string | null): Record<string, string> {
   const h: Record<string, string> = {
@@ -60,46 +59,6 @@ async function callerIsAllowed(authHeader: string): Promise<'yes' | 'no' | 'unau
   }
 }
 
-interface ItemResult {
-  id: string;
-  ok: boolean;
-  error?: string;
-  gatewayMessageId?: string;
-}
-
-async function sendOne(item: SmsItem, auth: string): Promise<ItemResult & { authFailed?: boolean }> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), GATEWAY_TIMEOUT_MS);
-  try {
-    const res = await fetch(SMSGATE_URL, {
-      method: 'POST',
-      headers: { Authorization: auth, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ textMessage: { text: item.text }, phoneNumbers: [item.phone] }),
-      signal: ctrl.signal,
-    });
-    if (res.status === 401 || res.status === 403) {
-      await res.body?.cancel();
-      return { id: item.id, ok: false, error: 'gateway_auth_failed', authFailed: true };
-    }
-    if (!res.ok) {
-      await res.body?.cancel();
-      return { id: item.id, ok: false, error: 'gateway_rejected' };
-    }
-    let gatewayMessageId: string | undefined;
-    try {
-      const j = await res.json();
-      if (j && typeof j.id === 'string') gatewayMessageId = j.id;
-    } catch {
-      /* ignore body */
-    }
-    return { id: item.id, ok: true, gatewayMessageId };
-  } catch (err) {
-    return { id: item.id, ok: false, error: (err as Error)?.name === 'AbortError' ? 'gateway_timeout' : 'gateway_unreachable' };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 Deno.serve(async (req: Request) => {
   const origin = req.headers.get('Origin');
 
@@ -140,14 +99,25 @@ Deno.serve(async (req: Request) => {
   const user = Deno.env.get('SMSGATE_USERNAME') ?? '';
   const pass = Deno.env.get('SMSGATE_PASSWORD') ?? '';
   const configured = !!user && !!pass;
+  // Optional SMSGate passphrase E2E encryption: automatic when the secret is set. Never logged.
+  const passphrase = Deno.env.get('SMSGATE_ENCRYPTION_PASSPHRASE') || undefined;
+  const encrypted = !!passphrase;
 
-  if (v.value.action === 'status') return json(200, { ok: true, configured }, origin);
+  if (v.value.action === 'status') return json(200, { ok: true, configured, encrypted }, origin);
 
   if (!configured) {
     return json(503, { ok: false, error: 'sms_gateway_not_configured', message: 'SMS gateway not configured' }, origin);
   }
 
   const auth = basicAuth(user, pass);
+  if (v.value.action === 'messageStatus') {
+    const statuses = await statusMany(v.value.ids, auth, fetch);
+    // Counts per state only — never ids with phones, bodies or credentials.
+    const counts: Record<string, number> = {};
+    for (const s of statuses) counts[s.state] = (counts[s.state] ?? 0) + 1;
+    console.log(`school-notify-sms: status ${Object.entries(counts).map(([k, n]) => `${k}=${n}`).join(' ')}`);
+    return json(200, { ok: true, statuses }, origin);
+  }
   const results: ItemResult[] = [];
   let authFailed = false;
   for (const item of v.value.messages) {
@@ -155,7 +125,7 @@ Deno.serve(async (req: Request) => {
       results.push({ id: item.id, ok: false, error: 'gateway_auth_failed' });
       continue;
     }
-    const r = await sendOne(item, auth);
+    const r = await sendOne(item, auth, fetch, passphrase);
     if (r.authFailed) authFailed = true;
     results.push({ id: r.id, ok: r.ok, error: r.error, gatewayMessageId: r.gatewayMessageId });
   }

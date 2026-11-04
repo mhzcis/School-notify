@@ -187,6 +187,8 @@ export const logToRow = (l: MessageLog, owner: string, campaignId: string, stude
     grade: l.grade,
     section: l.section,
     channel: l.channel,
+    ...(l.gatewayMessageId ? { gatewayMessageId: l.gatewayMessageId } : {}),
+    ...(l.gatewayState ? { gatewayState: l.gatewayState } : {}),
   },
 });
 
@@ -206,6 +208,8 @@ export const rowToLog = (r: MessageRow): MessageLog => {
     status: r.status as MessageLog['status'],
     failureReason: r.error ?? undefined,
     channel: m.channel,
+    ...(m.gatewayMessageId ? { gatewayMessageId: m.gatewayMessageId } : {}),
+    ...(m.gatewayState ? { gatewayState: m.gatewayState } : {}),
   };
 };
 

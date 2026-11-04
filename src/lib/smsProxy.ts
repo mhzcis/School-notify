@@ -2,10 +2,11 @@
  * Client for the `school-notify-sms` Supabase Edge Function (the only way the app sends SMS).
  * The SMSGate credentials live only in the function's secrets; the browser never sees them.
  */
-import { MAX_RECIPIENTS_PER_CALL, SmsItem, validateProxyRequest } from '../../supabase/functions/school-notify-sms/validate';
+import { MAX_RECIPIENTS_PER_CALL, MAX_STATUS_IDS, SmsItem, validateProxyRequest } from '../../supabase/functions/school-notify-sms/validate';
 import { toInternational } from './phone';
 import { chunk } from './repo/mapping';
 
+import { mergeState } from '../../supabase/functions/school-notify-sms-webhook/webhook';
 export { MAX_RECIPIENTS_PER_CALL, MAX_BODY_CHARS } from '../../supabase/functions/school-notify-sms/validate';
 
 export interface ProxyItemResult {
@@ -16,7 +17,7 @@ export interface ProxyItemResult {
 }
 
 export type ProxyResponse =
-  | { ok: true; configured?: boolean; results?: ProxyItemResult[] }
+  | { ok: true; configured?: boolean; /** SMSGate passphrase encryption active (server secret set). */ encrypted?: boolean; results?: ProxyItemResult[] }
   | { ok: false; error: string; httpStatus?: number };
 
 export type ProxyInvoker = (body: unknown) => Promise<ProxyResponse>;
@@ -40,20 +41,67 @@ export function toProxyItems(msgs: OutgoingSms[]): { items: SmsItem[]; rejected:
   return { items, rejected };
 }
 
+export type GatewayState = 'Pending' | 'Cancelling' | 'Cancelled' | 'Processed' | 'Sent' | 'Delivered' | 'Failed' | 'Unknown';
+export interface GatewayStatus {
+  id: string;
+  state: GatewayState;
+  error?: string;
+}
+
+/** Recipients per Edge Function call; small batches are gentler on the sending phone/SIM. */
+export const DEFAULT_BATCH_SIZE = 5;
+/** Default pause between batches. */
+export const DEFAULT_BATCH_DELAY_SEC = 2;
+
+export interface SendOptions {
+  batchSize?: number;
+  /** Pause between batches (ms). */
+  delayMs?: number;
+  signal?: AbortSignal;
+  /** Injected for tests. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+}
+
+/** setTimeout-based sleep that resolves early when aborted. */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (ms <= 0 || signal?.aborted) return resolve();
+    const t = setTimeout(done, ms);
+    function done() {
+      clearTimeout(t);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done);
+  });
+}
+
 /**
- * Sends in batches of MAX_RECIPIENTS_PER_CALL. A request-level failure (e.g. gateway not configured)
- * stops the run: the remaining messages are reported with that error and nothing more is sent.
+ * Sends in small batches with a pause between them. A request-level failure (e.g. gateway not
+ * configured) stops the run: the remaining messages are reported with that error. Aborting stops
+ * before the next batch; unsent messages are reported with error 'aborted'.
+ * ok=true means ACCEPTED by the gateway (queued), not sent by the phone; use pollMessageStatus.
  */
 export async function sendViaProxy(
   invoke: ProxyInvoker,
   msgs: OutgoingSms[],
-  onProgress?: (results: ProxyItemResult[]) => void
-): Promise<{ results: ProxyItemResult[]; fatalError?: string }> {
+  onProgress?: (results: ProxyItemResult[]) => void,
+  opts: SendOptions = {}
+): Promise<{ results: ProxyItemResult[]; fatalError?: string; aborted?: boolean }> {
+  const size = Math.max(1, Math.min(opts.batchSize ?? DEFAULT_BATCH_SIZE, MAX_RECIPIENTS_PER_CALL));
+  const delayMs = Math.max(0, opts.delayMs ?? 0);
+  const wait = opts.sleep ?? sleep;
   const { items, rejected } = toProxyItems(msgs);
   const results: ProxyItemResult[] = [...rejected];
   if (rejected.length) onProgress?.([...results]);
-  const batches = chunk(items, MAX_RECIPIENTS_PER_CALL);
+  const batches = chunk(items, size);
   for (let b = 0; b < batches.length; b++) {
+    if (b > 0 && delayMs) await wait(delayMs, opts.signal);
+    if (opts.signal?.aborted) {
+      results.push(...batches.slice(b).flat().map(i => ({ id: i.id, ok: false, error: 'aborted' })));
+      onProgress?.([...results]);
+      return { results, aborted: true };
+    }
     const batch = batches[b];
     const body = { action: 'send', messages: batch };
     const v = validateProxyRequest(body);
@@ -80,6 +128,141 @@ export async function sendViaProxy(
   return { results };
 }
 
+/** States after which we stop polling a message (Sent is NOT final: we wait for the delivery report). */
+export const FINAL_GATEWAY_STATES: GatewayState[] = ['Delivered', 'Failed', 'Cancelled'];
+
+export const POLL_INITIAL_INTERVAL_MS = 10_000;
+export const POLL_MAX_INTERVAL_MS = 30_000;
+export const POLL_TIMEOUT_MS = 30 * 60_000;
+
+export interface PollOptions {
+  /** First wait (default 10s); grows ×1.5 per round up to maxIntervalMs (default 30s). */
+  intervalMs?: number;
+  maxIntervalMs?: number;
+  /** Upper bound for the whole polling run (default 30 min). */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  onUpdate?: (statuses: Map<string, GatewayStatus>) => void;
+  /** Known states (e.g. from history) — never downgraded. */
+  initial?: Map<string, GatewayState>;
+}
+
+const STOP_ERRORS = ['unauthorized', 'not_allowed', 'sms_gateway_not_configured'];
+
+/**
+ * One status lookup round for the given ids (chunked by MAX_STATUS_IDS), merged into `map`
+ * with the no-downgrade rule. Returns true when polling should stop (auth/config problem).
+ */
+export async function refreshStatusesOnce(
+  invoke: ProxyInvoker,
+  map: Map<string, GatewayStatus>,
+  ids: string[]
+): Promise<boolean> {
+  let stop = false;
+  for (const part of chunk(ids, MAX_STATUS_IDS)) {
+    let res: any;
+    try {
+      res = await invoke({ action: 'messageStatus', ids: part });
+    } catch {
+      res = { ok: false, error: 'offline' };
+    }
+    if (!res?.ok) {
+      if (STOP_ERRORS.includes(res?.error)) stop = true;
+      continue;
+    }
+    for (const st of (res.statuses ?? []) as GatewayStatus[]) {
+      if (!map.has(st.id)) continue;
+      if (st.state === 'Unknown' && st.error === 'gateway_auth_failed') stop = true;
+      // Unknown (temporary lookup error) never overwrites; older states never downgrade.
+      if (st.state === 'Unknown') continue;
+      const cur = map.get(st.id)!;
+      const merged = mergeState(cur.state, st.state);
+      if (merged) map.set(st.id, { id: st.id, state: merged, ...(st.error ? { error: st.error } : {}) });
+    }
+  }
+  return stop;
+}
+
+/** Convenience: single lookup for ids with known current states. */
+export async function fetchStatusesOnce(
+  invoke: ProxyInvoker,
+  current: Map<string, GatewayState>
+): Promise<Map<string, GatewayStatus>> {
+  const map = new Map<string, GatewayStatus>([...current].map(([id, state]) => [id, { id, state }]));
+  const open = [...map.values()].filter(s => !FINAL_GATEWAY_STATES.includes(s.state)).map(s => s.id);
+  if (open.length) await refreshStatusesOnce(invoke, map, open);
+  return map;
+}
+
+/**
+ * Polls SMSGate until every message is Delivered/Failed/Cancelled, with backoff 10s→30s and an
+ * overall cap (default 30 min). Messages still open at the end stay in their last known state.
+ */
+export async function pollMessageStatus(
+  invoke: ProxyInvoker,
+  gatewayIds: string[],
+  opts: PollOptions = {}
+): Promise<Map<string, GatewayStatus>> {
+  let interval = Math.max(1, opts.intervalMs ?? POLL_INITIAL_INTERVAL_MS);
+  const maxInterval = Math.max(interval, opts.maxIntervalMs ?? POLL_MAX_INTERVAL_MS);
+  const timeoutMs = opts.timeoutMs ?? POLL_TIMEOUT_MS;
+  const wait = opts.sleep ?? sleep;
+  const ids = [...new Set(gatewayIds.filter(Boolean))];
+  const map = new Map<string, GatewayStatus>(
+    ids.map(id => [id, { id, state: (opts.initial?.get(id) ?? 'Pending') as GatewayState }])
+  );
+  const isOpen = (id: string) => !FINAL_GATEWAY_STATES.includes(map.get(id)!.state);
+  let elapsed = 0;
+  while (ids.some(isOpen)) {
+    if (elapsed + interval > timeoutMs && elapsed > 0) break;
+    await wait(interval, opts.signal);
+    elapsed += interval;
+    if (opts.signal?.aborted) break;
+    const stop = await refreshStatusesOnce(invoke, map, ids.filter(isOpen));
+    opts.onUpdate?.(new Map(map));
+    if (stop || elapsed >= timeoutMs) break;
+    interval = Math.min(maxInterval, Math.round(interval * 1.5));
+  }
+  return map;
+}
+
+export interface GatewayCounts {
+  accepted: number;
+  pending: number;
+  sent: number;
+  delivered: number;
+  failed: number;
+}
+
+export function countGatewayStates(statuses: Iterable<GatewayStatus>): GatewayCounts {
+  const c: GatewayCounts = { accepted: 0, pending: 0, sent: 0, delivered: 0, failed: 0 };
+  for (const s of statuses) {
+    c.accepted++;
+    if (s.state === 'Sent') c.sent++;
+    else if (s.state === 'Delivered') c.delivered++;
+    else if (s.state === 'Failed' || s.state === 'Cancelled') c.failed++;
+    else c.pending++;
+  }
+  return c;
+}
+
+/** Arabic one-liner: "قبلتها البوابة: N — الحالة: ..." */
+export function gatewayCountsText(c: GatewayCounts): string {
+  return `قبلتها البوابة: ${c.accepted} — الحالة: أُرسلت من الهاتف ${c.sent}، تم التسليم ${c.delivered}، بانتظار الهاتف ${c.pending}، فشلت ${c.failed}`;
+}
+
+export const GATEWAY_STATE_LABELS: Record<GatewayState, string> = {
+  Pending: 'قبلتها البوابة، بانتظار الهاتف',
+  Processed: 'استلمها الهاتف، قيد الإرسال',
+  Sent: 'أُرسلت من الهاتف',
+  Delivered: 'تم تأكيد التسليم',
+  Failed: 'فشل الإرسال من الهاتف',
+  Cancelling: 'جارٍ الإلغاء',
+  Cancelled: 'أُلغيت',
+  Unknown: 'حالة غير معروفة',
+};
+
 /** Arabic, user-facing text for a proxy error code. */
 export function proxyErrorMessage(code: string | undefined): string {
   switch (code) {
@@ -99,6 +282,8 @@ export function proxyErrorMessage(code: string | undefined): string {
     case 'invalid_json':
     case 'no_recipients':
       return 'طلب الإرسال غير صالح (عدد المستلمين أو صيغة الرقم أو طول النص).';
+    case 'aborted':
+      return 'أُوقف الإرسال يدوياً قبل إرسال هذه الرسالة.';
     case 'invalid_phone':
       return 'رقم الجوال غير صالح.';
     case 'gateway_auth_failed':
@@ -106,6 +291,8 @@ export function proxyErrorMessage(code: string | undefined): string {
     case 'gateway_timeout':
     case 'gateway_unreachable':
       return 'تعذر الاتصال ببوابة SMSGate. حاول لاحقاً.';
+    case 'encryption_failed':
+      return 'تعذر تشفير الرسالة؛ لم تُرسل (لا يتم الإرسال بدون تشفير عند تفعيله).';
     case 'gateway_rejected':
       return 'رفضت بوابة SMSGate الرسالة.';
     case 'client_not_configured':

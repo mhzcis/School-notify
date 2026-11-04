@@ -13,6 +13,9 @@ import { SECRET_MASK } from '../lib/template';
 interface ReportsPanelProps {
   logs: MessageLog[];
   onClearLogs: () => void;
+  /** Re-query SMSGate for accepted/pending messages by their stored gateway ids. */
+  onRefreshStatuses?: () => void | Promise<void>;
+  isRefreshingStatuses?: boolean;
 }
 
 const STATUS_BADGE_CLASS: Record<string, string> = {
@@ -26,7 +29,7 @@ function log_status_text(status: string): string {
   return status === 'failed' ? 'text-rose-400' : status === 'delivered' ? 'text-emerald-400' : 'text-sky-300';
 }
 
-export default function ReportsPanel({ logs, onClearLogs }: ReportsPanelProps) {
+export default function ReportsPanel({ logs, onClearLogs, onRefreshStatuses, isRefreshingStatuses }: ReportsPanelProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<'all' | 'sent' | 'delivered' | 'failed'>('all');
   const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
@@ -78,6 +81,16 @@ export default function ReportsPanel({ logs, onClearLogs }: ReportsPanelProps) {
           <p className="text-sm text-slate-500 mt-1">تتبع نسبة وصول الإشعارات لأولياء الأمور ومعدل الاستلام الفعلي في الوقت الحقيقي</p>
         </div>
 
+        {onRefreshStatuses && logs.some(l => l.gatewayMessageId) && (
+          <button
+            onClick={() => void onRefreshStatuses()}
+            disabled={isRefreshingStatuses}
+            className="text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg transition shrink-0 self-start md:self-center disabled:opacity-50"
+            id="btn-refresh-statuses"
+          >
+            {isRefreshingStatuses ? 'جاري تحديث الحالة...' : 'تحديث الحالة'}
+          </button>
+        )}
         {logs.length > 0 && (
           <button
             onClick={onClearLogs}

@@ -11,12 +11,16 @@ import { buildDispatchItems } from '../lib/recipients';
 import { matchNames } from '../lib/nameMatching';
 import { segmentInfo } from '../lib/sms';
 import ConfirmSendDialog from './ConfirmSendDialog';
-import { statusAfterGatewayCall } from '../lib/logStatus';
 import { PHONE_PROBLEM_LABELS } from '../lib/phone';
 import { Student, MessageTemplate, ScheduledMessage, MessageLog } from '../types';
 import { readUseCloudGateway } from '../lib/smsPrefs';
 import { invokeSmsFunction } from '../lib/supabase';
-import { proxyErrorMessage, sendViaProxy, ProxyItemResult } from '../lib/smsProxy';
+import {
+  GATEWAY_STATE_LABELS, GatewayCounts, GatewayStatus, countGatewayStates, gatewayCountsText, pollMessageStatus, fetchStatusesOnce,
+  proxyErrorMessage, sendViaProxy, ProxyItemResult,
+} from '../lib/smsProxy';
+import { readBatchDelaySec } from '../lib/smsPrefs';
+import { mergeState } from '../../supabase/functions/school-notify-sms-webhook/webhook';
 import { newId as newLogId } from '../lib/repo/mapping';
 import { 
   Send, 
@@ -75,7 +79,9 @@ function isNoiseRow(name: string): boolean {
 interface MessageComposerProps {
   students: Student[];
   templates: MessageTemplate[];
-  onSendImmediate: (logs: MessageLog[]) => void;
+  onSendImmediate: (logs: MessageLog[], opts?: { stayOnTab?: boolean }) => void;
+  /** Live gateway states (by SMSGate message id) for logs already handed to onSendImmediate. */
+  onGatewayStatuses?: (statuses: Map<string, GatewayStatus>) => void;
   onScheduleMessage: (scheduled: Omit<ScheduledMessage, 'id' | 'createdAt' | 'status'>) => void;
   schoolName: string;
   onUpdateSchoolName: (name: string) => void;
@@ -99,6 +105,7 @@ export default function MessageComposer({
   students,
   templates,
   onSendImmediate,
+  onGatewayStatuses,
   onScheduleMessage,
   schoolName,
   onUpdateSchoolName,
@@ -111,8 +118,10 @@ export default function MessageComposer({
   // Campaign id of a scheduled campaign loaded via "send now"; attached to the resulting logs
   const activeCampaignIdRef = useRef<string | undefined>(undefined);
   const [activePrefillTitle, setActivePrefillTitle] = useState<string | null>(null);
-  const emitLogs = (logs: MessageLog[]) => {
-    onSendImmediate(logs);
+  const manualRefreshRef = useRef<null | (() => Promise<void>)>(null);
+  const [isManualRefreshing, setIsManualRefreshing] = useState(false);
+  const emitLogs = (logs: MessageLog[], opts?: { stayOnTab?: boolean }) => {
+    onSendImmediate(logs, opts);
     activeCampaignIdRef.current = undefined;
     setActivePrefillTitle(null);
   };
@@ -381,7 +390,8 @@ export default function MessageComposer({
     current: number;
     total: number;
     studentName: string;
-    stage: 'sending' | 'finished';
+    stage: 'sending' | 'polling' | 'finished';
+    gatewayCounts?: GatewayCounts;
     successCount: number;
     failedCount: number;
     statusText: string;
@@ -402,6 +412,8 @@ export default function MessageComposer({
     statusText: '',
     results: []
   });
+
+  const silentAbortRef = useRef<AbortController | null>(null);
 
   // Manual sequential browser communication broadcast state controllers
   const [isManualSequentialActive, setIsManualSequentialActive] = useState<boolean>(false);
@@ -829,11 +841,13 @@ export default function MessageComposer({
               name: item.studentName,
               phone: item.phone,
               status: r.ok ? 'success' as const : 'failed' as const,
-              message: r.ok ? 'سُلّمت للبوابة (لا يوجد تأكيد استلام من الهاتف بعد)' : proxyErrorMessage(r.error),
+              message: r.ok ? 'قبلتها البوابة (بانتظار إرسال الهاتف)' : proxyErrorMessage(r.error),
               content: item.logContent ?? item.content
             };
           };
-          const { results, fatalError } = await sendViaProxy(
+          const abort = new AbortController();
+          silentAbortRef.current = abort;
+          const { results, fatalError, aborted } = await sendViaProxy(
             invokeSmsFunction,
             keyed.map(k => ({ id: k.key, phone: k.item.phone, text: k.item.content })),
             partial => {
@@ -848,10 +862,15 @@ export default function MessageComposer({
                 failedCount: partial.length - ok,
                 results: rows
               }));
-            }
+            },
+            { delayMs: readBatchDelaySec() * 1000, signal: abort.signal }
           );
 
+          // A request-level failure (e.g. gateway not configured) sent nothing: do not record fake history.
+          const nothingSent = fatalError === 'sms_gateway_not_configured' || fatalError === 'unauthorized' || fatalError === 'not_allowed';
           const now = new Date().toISOString();
+          // History is saved right away (accepted = 'pending'); states are updated as they arrive
+          // (polling below, the webhook, or "تحديث الحالة" in reports).
           const generatedLogs: MessageLog[] = results.map(r => {
             const item = byKey.get(r.id)!;
             return {
@@ -864,27 +883,57 @@ export default function MessageComposer({
               section: item.section,
               messageContent: item.logContent ?? item.content, // never store the Moodle password in logs
               sentTime: now,
-              status: statusAfterGatewayCall(r.ok),
+              status: r.ok ? 'pending' as const : 'failed' as const,
               failureReason: r.ok ? undefined : proxyErrorMessage(r.error),
+              gatewayMessageId: r.gatewayMessageId,
+              gatewayState: r.ok ? 'Pending' : undefined,
               channel: 'gateway' as const,
               campaignId: activeCampaignIdRef.current,
             };
           });
+          if (nothingSent) activeCampaignIdRef.current = undefined;
+          else emitLogs(generatedLogs, { stayOnTab: true });
+
+          // Follow the real per-message state on the phone until Delivered/Failed/Cancelled
+          // (backoff 10s→30s, capped at 30 minutes). The webhook updates the history too.
+          const gatewayIds = results.filter(r => r.ok && r.gatewayMessageId).map(r => r.gatewayMessageId!);
+          const latest = new Map<string, GatewayStatus>(gatewayIds.map(id => [id, { id, state: 'Pending' as const }]));
+          const applyStatuses = (m: Map<string, GatewayStatus>) => {
+            for (const st of m.values()) {
+              const cur = latest.get(st.id);
+              if (cur && mergeState(cur.state, st.state)) latest.set(st.id, st);
+            }
+            const counts = countGatewayStates(latest.values());
+            onGatewayStatuses?.(new Map(latest));
+            setSilentProgress(prev => ({
+              ...prev,
+              gatewayCounts: counts,
+              statusText: prev.stage === 'polling' ? `${gatewayCountsText(counts)} — المتابعة مستمرة حتى التسليم أو الفشل (حتى 30 دقيقة)` : gatewayCountsText(counts),
+              results: results.map(r => {
+                const row = toRow(r);
+                const st = r.gatewayMessageId ? latest.get(r.gatewayMessageId) : undefined;
+                if (!st) return row;
+                const failed = st.state === 'Failed' || st.state === 'Cancelled';
+                return { ...row, status: failed ? 'failed' as const : 'success' as const, message: `${GATEWAY_STATE_LABELS[st.state]}${st.error ? `: ${st.error}` : ''}` };
+              }),
+            }));
+          };
+          manualRefreshRef.current = gatewayIds.length && !nothingSent
+            ? async () => applyStatuses(await fetchStatusesOnce(invokeSmsFunction, new Map([...latest].map(([id, st]) => [id, st.state]))))
+            : null;
+          if (gatewayIds.length && !nothingSent) {
+            setSilentProgress(prev => ({ ...prev, stage: 'polling', statusText: `قبلتها البوابة: ${gatewayIds.length} — جاري متابعة الحالة على الهاتف حتى التسليم أو الفشل (حتى 30 دقيقة)...` }));
+            applyStatuses(await pollMessageStatus(invokeSmsFunction, gatewayIds, { signal: abort.signal, onUpdate: applyStatuses }));
+          }
+          silentAbortRef.current = null;
 
           setSilentProgress(prev => ({
             ...prev,
             stage: 'finished',
             statusText: fatalError
               ? `توقف الإرسال: ${proxyErrorMessage(fatalError)}`
-              : 'تم الانتهاء من معالجة جميع الرسائل عبر خادم الإرسال.'
+              : `${aborted ? 'أُوقف الإرسال/المتابعة يدوياً. ' : ''}${gatewayCountsText(countGatewayStates(latest.values()))}${[...latest.values()].some(st => !['Delivered', 'Failed', 'Cancelled'].includes(st.state)) ? ' — يمكن تحديث الباقي لاحقاً من «تحديث الحالة» أو تلقائياً عبر الويب هوك.' : ''}`
           }));
-
-          // A request-level failure (e.g. gateway not configured) sent nothing: do not record fake history.
-          if (fatalError === 'sms_gateway_not_configured' || fatalError === 'unauthorized' || fatalError === 'not_allowed') {
-            activeCampaignIdRef.current = undefined;
-            return;
-          }
-          emitLogs(generatedLogs);
         })();
       } else {
         // Standard Manual clicks with Pop-ups (Free sequential browser mode)
@@ -1812,15 +1861,31 @@ export default function MessageComposer({
             {/* Modal Header */}
             <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-50">
               <div className="flex items-center gap-2.5">
-                {silentProgress.stage === 'sending' ? (
+                {silentProgress.stage !== 'sending' && manualRefreshRef.current && (
+                <button
+                  type="button"
+                  id="btn-refresh-gateway-status"
+                  disabled={isManualRefreshing}
+                  onClick={async () => {
+                    setIsManualRefreshing(true);
+                    try { await manualRefreshRef.current?.(); } finally { setIsManualRefreshing(false); }
+                  }}
+                  className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl cursor-pointer font-sans disabled:opacity-50"
+                >
+                  {isManualRefreshing ? 'جاري التحديث...' : 'تحديث الحالة'}
+                </button>
+              )}
+              {silentProgress.stage !== 'finished' ? (
                   <Loader2 className="w-5 h-5 text-indigo-600 animate-spin" />
                 ) : (
                   <ShieldCheck className="w-5 h-5 text-emerald-600" />
                 )}
                 <h3 className="font-bold text-slate-800 text-base">
-                  {silentProgress.stage === 'sending' 
-                    ? 'جاري إرسال وبث الإشعارات بالخلفية بشكل صامت تلقائياً...' 
-                    : 'اكتملت حملة البث الدفعي الصامت بنجاح!'}
+                  {silentProgress.stage === 'sending'
+                    ? 'جاري إرسال الإشعارات على دفعات عبر البوابة...'
+                    : silentProgress.stage === 'polling'
+                      ? 'جاري متابعة حالة الرسائل على الهاتف...'
+                      : 'انتهت الحملة — راجع حالة كل رسالة أدناه'}
                 </h3>
               </div>
               
@@ -1859,10 +1924,19 @@ export default function MessageComposer({
                 <p className="text-xs text-slate-500 italic mt-1 font-medium">{silentProgress.statusText}</p>
               </div>
 
+              {silentProgress.gatewayCounts && (
+                <div className="grid grid-cols-4 gap-2 text-center text-[10px] font-bold" id="gateway-state-counts">
+                  <div className="bg-amber-50 rounded-lg p-2 text-amber-800">بانتظار الهاتف<div className="text-base font-mono">{silentProgress.gatewayCounts.pending}</div></div>
+                  <div className="bg-sky-50 rounded-lg p-2 text-sky-800">أُرسلت<div className="text-base font-mono">{silentProgress.gatewayCounts.sent}</div></div>
+                  <div className="bg-emerald-50 rounded-lg p-2 text-emerald-800">سُلّمت<div className="text-base font-mono">{silentProgress.gatewayCounts.delivered}</div></div>
+                  <div className="bg-rose-50 rounded-lg p-2 text-rose-800">فشلت<div className="text-base font-mono">{silentProgress.gatewayCounts.failed}</div></div>
+                </div>
+              )}
+
               {/* Success Ratio Counter Cards */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="bg-emerald-50/70 border border-emerald-100 rounded-xl p-3 text-right">
-                  <div className="text-[10px] text-emerald-700 font-bold">نجحت عملية البث والتسليم</div>
+                  <div className="text-[10px] text-emerald-700 font-bold">قبلتها البوابة</div>
                   <div className="text-xl font-bold font-mono text-emerald-600 mt-1">{silentProgress.successCount} رسالة</div>
                 </div>
                 <div className="bg-rose-50/70 border border-rose-100 rounded-xl p-3 text-right">
@@ -1886,14 +1960,14 @@ export default function MessageComposer({
                             <span className="text-[10px] text-slate-400 font-mono font-normal">({res.phone})</span>
                           </div>
                           <div className="text-[10px] text-slate-500 line-clamp-1">{res.content}</div>
-                          {res.status === 'failed' && (
+                          {res.status === 'failed' && res.message && (
                             <div className="text-[9.5px] text-rose-600 font-semibold italic font-medium">سبب عطل البث: {res.message}</div>
                           )}
                         </div>
 
                         <div className="flex items-center gap-1.5 self-end sm:self-center shrink-0">
                           {res.status === 'success' ? (
-                            <span className="px-2.5 py-0.5 rounded-md text-[9.5px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-100">✓ تم الإرسال</span>
+                            <span className="px-2.5 py-0.5 rounded-md text-[9.5px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-100">{res.message}</span>
                           ) : (
                             <span className="px-2.5 py-0.5 rounded-md text-[9.5px] font-bold bg-rose-50 text-rose-700 border border-rose-100">⚠️ فشل بروتوكولياً</span>
                           )}
@@ -1908,8 +1982,18 @@ export default function MessageComposer({
 
             {/* Modal Footer */}
             <div className="p-4 border-t border-slate-100 flex items-center justify-end bg-slate-50 gap-3">
-              {silentProgress.stage === 'sending' ? (
-                <div className="text-[11px] text-slate-500 font-medium font-sans">الرجاء إبقاء هذه التبويبة نشطة ومفتوحة، سيقوم التطبيق بالبث دفعة واحدة صامتاً...</div>
+              {silentProgress.stage !== 'finished' ? (
+                <>
+                  <div className="text-[11px] text-slate-500 font-medium font-sans">الرجاء إبقاء هذه التبويبة مفتوحة حتى انتهاء الإرسال والمتابعة.</div>
+                  <button
+                    type="button"
+                    id="btn-abort-silent-send"
+                    onClick={() => silentAbortRef.current?.abort()}
+                    className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl cursor-pointer font-sans"
+                  >
+                    {silentProgress.stage === 'sending' ? 'إيقاف الإرسال' : 'إيقاف المتابعة'}
+                  </button>
+                </>
               ) : (
                 <button
                   type="button"
@@ -1921,7 +2005,7 @@ export default function MessageComposer({
                   }}
                   className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer font-sans"
                 >
-                  حفظ تقارير البث وإغلاق الشاشة
+                  إغلاق الشاشة (السجل محفوظ في التقارير)
                 </button>
               )}
             </div>

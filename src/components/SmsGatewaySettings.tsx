@@ -7,9 +7,11 @@
  */
 import React, { useState } from 'react';
 import { SlidersHorizontal, Smartphone, Loader2, ShieldCheck, AlertCircle, Info, Cloud, RefreshCw, Send } from 'lucide-react';
-import { readUseCloudGateway, writeUseCloudGateway } from '../lib/smsPrefs';
+import { readBatchDelaySec, readUseCloudGateway, writeBatchDelaySec, writeUseCloudGateway } from '../lib/smsPrefs';
 import { invokeSmsFunction } from '../lib/supabase';
-import { proxyErrorMessage, sendViaProxy, ProxyInvoker } from '../lib/smsProxy';
+import {
+  GATEWAY_STATE_LABELS, countGatewayStates, gatewayCountsText, pollMessageStatus, fetchStatusesOnce, GatewayState, proxyErrorMessage, sendViaProxy, ProxyInvoker,
+} from '../lib/smsProxy';
 import { segmentInfo } from '../lib/sms';
 import { checkPhone, PHONE_PROBLEM_LABELS } from '../lib/phone';
 
@@ -21,16 +23,19 @@ interface SmsGatewaySettingsProps {
   onRefreshStatus: () => void | Promise<void>;
   /** Injected for tests; defaults to the Edge Function. */
   invoke?: ProxyInvoker;
+  /** Status polling options (injected for tests). */
+  pollOptions?: { intervalMs?: number; timeoutMs?: number };
 }
 
 export const NOT_CONFIGURED_MESSAGE =
   'بوابة SMS غير مهيأة بعد على الخادم. يجب على مالك النظام إضافة SMSGATE_USERNAME و SMSGATE_PASSWORD في إعدادات Supabase (Edge Functions › Secrets).';
 
-export default function SmsGatewaySettings({ schoolName, gatewayStatus, onRefreshStatus, invoke = invokeSmsFunction }: SmsGatewaySettingsProps) {
+export default function SmsGatewaySettings({ schoolName, gatewayStatus, onRefreshStatus, invoke = invokeSmsFunction, pollOptions }: SmsGatewaySettingsProps) {
   const [useCloud, setUseCloud] = useState<boolean>(() => readUseCloudGateway());
   // The test phone is intentionally kept in memory only (never persisted).
   const [testPhone, setTestPhone] = useState('');
   const [testState, setTestState] = useState<{ loading: boolean; ok?: boolean; text?: string }>({ loading: false });
+  const [delaySec, setDelaySec] = useState<number>(() => readBatchDelaySec());
 
   const testText = `رسالة تجريبية من نظام الإشعارات المدرسية - ${schoolName}`;
   const seg = segmentInfo(testText);
@@ -40,7 +45,17 @@ export default function SmsGatewaySettings({ schoolName, gatewayStatus, onRefres
     writeUseCloudGateway(v);
   };
 
+  const [lastTest, setLastTest] = useState<{ id: string; state: GatewayState } | null>(null);
+  const handleRefreshTest = async () => {
+    if (!lastTest) return;
+    setTestState(prev => ({ ...prev, loading: true }));
+    const st = (await fetchStatusesOnce(invoke, new Map([[lastTest.id, lastTest.state]]))).get(lastTest.id)!;
+    setLastTest({ id: st.id, state: st.state });
+    setTestState({ loading: false, ok: st.state !== 'Failed' && st.state !== 'Cancelled', text: `الحالة: ${GATEWAY_STATE_LABELS[st.state]}${st.error ? `: ${st.error}` : ''}` });
+  };
+
   const handleTestSend = async () => {
+    setLastTest(null);
     const check = checkPhone(testPhone);
     if (!check.valid) {
       setTestState({ loading: false, ok: false, text: `رقم غير صالح: ${check.problem ? PHONE_PROBLEM_LABELS[check.problem] : ''}` });
@@ -51,7 +66,24 @@ export default function SmsGatewaySettings({ schoolName, gatewayStatus, onRefres
     const { results, fatalError } = await sendViaProxy(invoke, [{ id: 'test', phone: testPhone, text: testText }]);
     const r = results[0];
     if (r?.ok) {
-      setTestState({ loading: false, ok: true, text: 'تم تسليم الرسالة التجريبية إلى بوابة SMSGate بنجاح.' });
+      if (!r.gatewayMessageId) {
+        setTestState({ loading: false, ok: true, text: 'قبلت البوابة الرسالة التجريبية: 1 — الحالة غير متاحة (لم تُرجع البوابة رقم الرسالة).' });
+      } else {
+        setTestState({ loading: true, ok: true, text: 'قبلت البوابة الرسالة التجريبية: 1 — جاري متابعة حالتها على الهاتف...' });
+        const map = await pollMessageStatus(invoke, [r.gatewayMessageId], {
+          timeoutMs: 5 * 60_000,
+          ...pollOptions,
+          onUpdate: m => setTestState({ loading: true, ok: true, text: `قبلت البوابة الرسالة التجريبية: 1 — الحالة: ${GATEWAY_STATE_LABELS[m.get(r.gatewayMessageId!)!.state]}` }),
+        });
+        const st = map.get(r.gatewayMessageId)!;
+        setLastTest({ id: st.id, state: st.state });
+        const c = countGatewayStates(map.values());
+        setTestState({
+          loading: false,
+          ok: st.state !== 'Failed' && st.state !== 'Cancelled',
+          text: `${gatewayCountsText(c)}. (${GATEWAY_STATE_LABELS[st.state]}${st.error ? `: ${st.error}` : ''})`,
+        });
+      }
     } else {
       setTestState({ loading: false, ok: false, text: proxyErrorMessage(fatalError || r?.error) });
     }
@@ -119,6 +151,31 @@ export default function SmsGatewaySettings({ schoolName, gatewayStatus, onRefres
         </div>
       </section>
 
+      {/* Batch pacing */}
+      <section className="space-y-2 pt-4 border-t border-slate-100">
+        <h3 className="font-bold text-slate-700 text-sm">سرعة الإرسال الجماعي</h3>
+        <p className="text-xs text-slate-500">
+          تُرسل الرسائل على دفعات صغيرة (5 رسائل لكل دفعة) مع انتظار بين كل دفعة وأخرى (الافتراضي ثانيتان)، لتجنّب حدود الهاتف أو الشريحة.
+          إذا ظهر خطأ RESULT_RIL_MODEM_ERR أو فشل متكرر، زِد الانتظار هنا أو في إعدادات تطبيق SMSGate على الهاتف.
+        </p>
+        <label className="flex items-center gap-2 text-xs text-slate-700">
+          الانتظار بين الدفعات (ثانية):
+          <input
+            type="number"
+            min={0}
+            max={300}
+            value={delaySec}
+            onChange={e => {
+              const n = Number(e.target.value);
+              setDelaySec(n);
+              writeBatchDelaySec(n);
+            }}
+            className="border border-slate-300 rounded-lg px-2 py-1 text-xs w-20"
+            id="input-batch-delay"
+          />
+        </label>
+      </section>
+
       {/* Test send */}
       <section className="space-y-3 pt-4 border-t border-slate-100">
         <h3 className="font-bold text-slate-700 text-sm">إرسال رسالة تجريبية</h3>
@@ -146,6 +203,17 @@ export default function SmsGatewaySettings({ schoolName, gatewayStatus, onRefres
             {testState.loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
             إرسال تجريبي
           </button>
+          {lastTest && (
+            <button
+              type="button"
+              onClick={() => void handleRefreshTest()}
+              disabled={testState.loading}
+              className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-100 disabled:opacity-40 text-slate-700 text-xs font-bold rounded-lg cursor-pointer"
+              id="btn-refresh-test-status"
+            >
+              تحديث الحالة
+            </button>
+          )}
         </div>
         {testState.text && (
           <div
