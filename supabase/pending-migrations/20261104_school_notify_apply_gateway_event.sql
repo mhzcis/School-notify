@@ -1,4 +1,4 @@
--- PENDING — NOT APPLIED. Requires owner approval before running (Supabase SQL editor or apply_migration).
+-- APPLIED on 2026-11-04 (Supabase migration school_notify_apply_gateway_event). Kept here for reference.
 -- Purpose: let the `school-notify-sms-webhook` Edge Function update ONE message's gateway state by
 -- SMSGate message id, without giving service_role general table privileges on school_notify.
 -- Additive only: creates one function + one index. Drops nothing, changes no existing rows/columns.
