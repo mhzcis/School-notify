@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readPref, UI_PREF_KEYS } from '../lib/smsPrefs';
 import React, { useState, useMemo } from 'react';
 import { SchoolStats, Student } from '../types';
 import { checkPhone, isSendablePhone, PHONE_PROBLEM_LABELS } from '../lib/phone';
@@ -183,7 +184,7 @@ export default function DashboardOverview({
   };
 
   const getWhatsAppLinks = (phoneNumber: string) => {
-    const prefix = localStorage.getItem('resal_phone_prefix') || 'none';
+    const prefix = readPref(UI_PREF_KEYS.phonePrefix, 'none');
     let clean = phoneNumber.replace(/\D/g, '');
     if (clean.startsWith('0')) {
       clean = clean.substring(1);

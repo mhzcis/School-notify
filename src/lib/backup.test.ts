@@ -1,72 +1,52 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { applyBackup, backupFilename, createBackup, validateBackup, BACKUP_FORMAT } from './backup';
+import { InMemorySchoolRepository } from './repo/memoryRepo';
+import { fakeStudent, fakeStudents } from '../test/fixtures';
+import { AppData } from './repo/types';
 
-// FAKE fixtures only — no real student data.
-const fakeStudents = [
-  { id: 'FAKE-1', name: 'طالب تجريبي أول', parentName: 'ولي أمر تجريبي', phone: '0599000001', grade: 'الأول', section: 'أ', moodlePassword: 'FakePass#1' },
-];
-const fakeGateway = { name: 'gw', smsGateCloudUsername: 'fake-user', smsGateCloudPassword: 'fake-pass', apiUrl: 'http://example.invalid' };
+const data = (): AppData => ({
+  students: [fakeStudent(1, { moodlePassword: 'fake-pw-1' }), fakeStudent(2)],
+  templates: [{ id: '22222222-2222-4222-8222-222222222222', title: 'قالب تجريبي', content: 'نص', category: 'general' } as any],
+  campaigns: [],
+  logs: [],
+});
 
-describe('backup', () => {
-  beforeEach(() => {
-    localStorage.clear();
-    localStorage.setItem('resal_students', JSON.stringify(fakeStudents));
-    localStorage.setItem('resal_templates', '[]');
-    localStorage.setItem('resal_school_name', 'مدرسة تجريبية');
-    localStorage.setItem('resal_silent_gateway_config', JSON.stringify(fakeGateway));
-    localStorage.setItem('unrelated_key', 'x');
-  });
-
-  it('builds a dated filename', () => {
+describe('cloud backup', () => {
+  it('filename pattern', () => {
     expect(backupFilename(new Date(2026, 10, 4, 9, 5))).toBe('school-notify-backup-2026-11-04-0905.json');
-    expect(backupFilename(new Date(2026, 0, 2, 13, 30), 'pre-restore')).toBe('school-notify-pre-restore-2026-01-02-1330.json');
+    expect(backupFilename(new Date(2026, 10, 4, 9, 5), 'students', 'xlsx')).toBe('school-notify-students-2026-11-04-0905.xlsx');
   });
 
-  it('exports all resal_* keys with a version field and nothing else', () => {
-    const b = createBackup(localStorage, { includeCredentials: true });
+  it('strips Moodle passwords unless secrets are included', () => {
+    const b = createBackup(data());
     expect(b.format).toBe(BACKUP_FORMAT);
-    expect(b.version).toBe(1);
-    expect(Object.keys(b.data).sort()).toEqual(['resal_school_name', 'resal_silent_gateway_config', 'resal_students', 'resal_templates']);
-    expect(b.data.resal_students).toBe(localStorage.getItem('resal_students'));
+    expect(b.secretsIncluded).toBe(false);
+    expect(b.data.students[0].moodlePassword).toBe('');
+    expect(createBackup(data(), { includeSecrets: true }).data.students[0].moodlePassword).toBe('fake-pw-1');
   });
 
-  it('excludes secrets by default (gateway credentials and Moodle passwords)', () => {
-    const b = createBackup(localStorage);
-    expect(b.credentialsIncluded).toBe(false);
-    const gw = JSON.parse(b.data.resal_silent_gateway_config);
-    expect(gw.smsGateCloudPassword).toBe('');
-    expect(gw.smsGateCloudUsername).toBe('');
-    expect(gw.apiUrl).toBe('http://example.invalid');
-    const students = JSON.parse(b.data.resal_students);
-    expect(students[0].moodlePassword).toBe('');
-    expect(students[0].name).toBe('طالب تجريبي أول');
-  });
-
-  it('round-trips through validate + apply', () => {
-    const b = createBackup(localStorage, { includeCredentials: true });
-    const text = JSON.stringify(b);
-    localStorage.clear();
-    const v = validateBackup(text);
-    expect(v.ok).toBe(true);
-    if ('errors' in v) return;
-    expect(v.summary.students).toBe(1);
-    applyBackup(v.backup);
-    expect(JSON.parse(localStorage.getItem('resal_students')!)).toEqual(fakeStudents);
-    expect(localStorage.getItem('resal_school_name')).toBe('مدرسة تجريبية');
-  });
-
-  it('rejects invalid files', () => {
+  it('validate: round trip ok, rejects legacy v1, junk and bad records', () => {
+    const ok = validateBackup(JSON.stringify(createBackup(data())));
+    expect(ok.ok).toBe(true);
+    expect((ok as any).summary).toMatchObject({ students: 2, templates: 1, campaigns: 0, logs: 0 });
+    const legacy = validateBackup(JSON.stringify({ format: 'school-notify-backup', version: 1, data: { resal_students: '[]' } }));
+    expect(legacy.ok).toBe(false);
+    expect((legacy as any).errors[0]).toContain('قديمة');
     expect(validateBackup('not json').ok).toBe(false);
-    expect(validateBackup(JSON.stringify({ format: 'other', version: 1, data: {} })).ok).toBe(false);
-    expect(validateBackup(JSON.stringify({ format: BACKUP_FORMAT, version: 99, data: { resal_x: '1' } })).ok).toBe(false);
-    expect(validateBackup(JSON.stringify({ format: BACKUP_FORMAT, version: 1, data: { evil_key: '1' } })).ok).toBe(false);
-    expect(validateBackup(JSON.stringify({ format: BACKUP_FORMAT, version: 1, data: { resal_students: '{broken' } })).ok).toBe(false);
-    expect(validateBackup(JSON.stringify({ format: BACKUP_FORMAT, version: 1, data: { resal_students: '[{"foo":1}]' } })).ok).toBe(false);
+    const bad = createBackup(data()) as any;
+    bad.data.students.push({ name: 'بدون هوية' });
+    expect(validateBackup(JSON.stringify(bad)).ok).toBe(false);
   });
 
-  it('apply does not delete keys that are not in the backup', () => {
-    applyBackup({ format: BACKUP_FORMAT, version: 1, exportedAt: '', credentialsIncluded: false, data: { resal_school_name: 'جديد' } });
-    expect(localStorage.getItem('resal_school_name')).toBe('جديد');
-    expect(localStorage.getItem('resal_templates')).toBe('[]');
+  it('restore merges into the repository and keeps existing secrets when the file has none', async () => {
+    const repo = new InMemorySchoolRepository({ students: [fakeStudent(1, { moodlePassword: 'fake-pw-1' }), ...fakeStudents(1, 50)] });
+    const current = (await repo.loadAll()).students;
+    const file = createBackup({ ...data(), templates: [{ id: 'TMP1', title: 'قديم', content: 'نص', category: 'general' } as any] });
+    await applyBackup(file, repo, current);
+    const after = await repo.loadAll();
+    expect(after.students.map(s => s.id).sort()).toEqual(['1000000001', '1000000002', '1000000050']);
+    expect(after.students.find(s => s.id === '1000000001')!.moodlePassword).toBe('fake-pw-1');
+    expect(after.templates).toHaveLength(1);
+    expect(after.templates[0].id).not.toBe('TMP1'); // non-UUID ids get fresh UUIDs
   });
 });

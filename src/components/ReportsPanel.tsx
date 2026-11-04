@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readPref, UI_PREF_KEYS } from '../lib/smsPrefs';
 import React, { useState } from 'react';
 import { CHANNEL_LABELS, STATUS_LABELS, summarizeLogs } from '../lib/logStatus';
 import { MessageLog } from '../types';
@@ -359,7 +360,7 @@ export default function ReportsPanel({ logs, onClearLogs }: ReportsPanelProps) {
                   <button
                     type="button"
                     onClick={() => {
-                      const prefix = localStorage.getItem('resal_phone_prefix') || 'none';
+                      const prefix = readPref(UI_PREF_KEYS.phonePrefix, 'none');
                       let cleaned = selectedLog.phone.trim().replace(/\D/g, '');
                       if (prefix !== 'none') {
                         if (prefix === '966' && cleaned.startsWith('05')) {
@@ -384,7 +385,7 @@ export default function ReportsPanel({ logs, onClearLogs }: ReportsPanelProps) {
                   <button
                     type="button"
                     onClick={() => {
-                      const prefix = localStorage.getItem('resal_phone_prefix') || 'none';
+                      const prefix = readPref(UI_PREF_KEYS.phonePrefix, 'none');
                       let cleaned = selectedLog.phone.trim().replace(/\D/g, '');
                       if (prefix !== 'none') {
                         if (prefix === '966' && cleaned.startsWith('05')) {

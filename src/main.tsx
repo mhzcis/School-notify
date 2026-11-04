@@ -1,14 +1,12 @@
 import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
-import App from './App.tsx';
+import Root from './Root';
 import './index.css';
-import { runMigrations } from './lib/storage';
 
-// Stamp/upgrade the local data schema (additive only) before the app reads any data.
-runMigrations();
-
+// Old browser-only data (resal_* localStorage keys) is intentionally ignored: it is neither read
+// nor deleted. All school data now lives in the protected cloud schema.
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <Root />
   </StrictMode>,
 );

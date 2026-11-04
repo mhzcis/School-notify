@@ -38,7 +38,7 @@ export interface Student {
   previousYearGPA?: string; // معدل الطالب العام السابق
   notes?: string; // ملاحظات ومستحقات مخصصة
   moodleUsername?: string; // اسم مستخدم مودل الافتراضي
-  /** كلمة مرور مودل الافتراضية — حساسة: تُخفى في القوائم والمعاينات ولا تُحفظ في السجلات. مخزنة كنص عادي في localStorage. */
+  /** كلمة مرور مودل الافتراضية — حساسة: تُخفى في القوائم والمعاينات ولا تُحفظ في السجلات. مخزنة في السحابة (school_notify.students.extra) لحساب المالك فقط وتحميها RLS. */
   moodlePassword?: string;
 }
 
