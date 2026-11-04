@@ -16,11 +16,11 @@ import { Student, MessageTemplate, ScheduledMessage, MessageLog } from '../types
 import { readUseCloudGateway } from '../lib/smsPrefs';
 import { invokeSmsFunction } from '../lib/supabase';
 import {
-  GATEWAY_STATE_LABELS, GatewayCounts, GatewayStatus, countGatewayStates, gatewayCountsText, pollMessageStatus,
+  GATEWAY_STATE_LABELS, GatewayCounts, GatewayStatus, countGatewayStates, gatewayCountsText, pollMessageStatus, fetchStatusesOnce,
   proxyErrorMessage, sendViaProxy, ProxyItemResult,
 } from '../lib/smsProxy';
 import { readBatchDelaySec } from '../lib/smsPrefs';
-import { statusFromGatewayState } from '../lib/logStatus';
+import { mergeState } from '../../supabase/functions/school-notify-sms-webhook/webhook';
 import { newId as newLogId } from '../lib/repo/mapping';
 import { 
   Send, 
@@ -79,7 +79,9 @@ function isNoiseRow(name: string): boolean {
 interface MessageComposerProps {
   students: Student[];
   templates: MessageTemplate[];
-  onSendImmediate: (logs: MessageLog[]) => void;
+  onSendImmediate: (logs: MessageLog[], opts?: { stayOnTab?: boolean }) => void;
+  /** Live gateway states (by SMSGate message id) for logs already handed to onSendImmediate. */
+  onGatewayStatuses?: (statuses: Map<string, GatewayStatus>) => void;
   onScheduleMessage: (scheduled: Omit<ScheduledMessage, 'id' | 'createdAt' | 'status'>) => void;
   schoolName: string;
   onUpdateSchoolName: (name: string) => void;
@@ -103,6 +105,7 @@ export default function MessageComposer({
   students,
   templates,
   onSendImmediate,
+  onGatewayStatuses,
   onScheduleMessage,
   schoolName,
   onUpdateSchoolName,
@@ -115,8 +118,10 @@ export default function MessageComposer({
   // Campaign id of a scheduled campaign loaded via "send now"; attached to the resulting logs
   const activeCampaignIdRef = useRef<string | undefined>(undefined);
   const [activePrefillTitle, setActivePrefillTitle] = useState<string | null>(null);
-  const emitLogs = (logs: MessageLog[]) => {
-    onSendImmediate(logs);
+  const manualRefreshRef = useRef<null | (() => Promise<void>)>(null);
+  const [isManualRefreshing, setIsManualRefreshing] = useState(false);
+  const emitLogs = (logs: MessageLog[], opts?: { stayOnTab?: boolean }) => {
+    onSendImmediate(logs, opts);
     activeCampaignIdRef.current = undefined;
     setActivePrefillTitle(null);
   };
@@ -861,32 +866,11 @@ export default function MessageComposer({
             { delayMs: readBatchDelaySec() * 1000, signal: abort.signal }
           );
 
-          // Follow the real per-message state on the phone (bounded: ~2 minutes).
-          const gatewayIds = results.filter(r => r.ok && r.gatewayMessageId).map(r => r.gatewayMessageId!);
-          let statuses = new Map<string, GatewayStatus>();
-          const applyStatuses = (m: Map<string, GatewayStatus>) => {
-            const counts = countGatewayStates(m.values());
-            setSilentProgress(prev => ({
-              ...prev,
-              gatewayCounts: counts,
-              statusText: gatewayCountsText(counts),
-              results: results.map(r => {
-                const row = toRow(r);
-                const st = r.gatewayMessageId ? m.get(r.gatewayMessageId) : undefined;
-                if (!st) return row;
-                const failed = st.state === 'Failed' || st.state === 'Cancelled';
-                return { ...row, status: failed ? 'failed' as const : 'success' as const, message: `${GATEWAY_STATE_LABELS[st.state]}${st.error ? `: ${st.error}` : ''}` };
-              }),
-            }));
-          };
-          if (gatewayIds.length && fatalError !== 'unauthorized' && fatalError !== 'not_allowed') {
-            setSilentProgress(prev => ({ ...prev, stage: 'polling', statusText: `قبلتها البوابة: ${gatewayIds.length} — جاري متابعة الحالة على الهاتف (حتى دقيقتين)...` }));
-            statuses = await pollMessageStatus(invokeSmsFunction, gatewayIds, { signal: abort.signal, onUpdate: applyStatuses });
-            applyStatuses(statuses);
-          }
-          silentAbortRef.current = null;
-
+          // A request-level failure (e.g. gateway not configured) sent nothing: do not record fake history.
+          const nothingSent = fatalError === 'sms_gateway_not_configured' || fatalError === 'unauthorized' || fatalError === 'not_allowed';
           const now = new Date().toISOString();
+          // History is saved right away (accepted = 'pending'); states are updated as they arrive
+          // (polling below, the webhook, or "تحديث الحالة" in reports).
           const generatedLogs: MessageLog[] = results.map(r => {
             const item = byKey.get(r.id)!;
             return {
@@ -899,32 +883,57 @@ export default function MessageComposer({
               section: item.section,
               messageContent: item.logContent ?? item.content, // never store the Moodle password in logs
               sentTime: now,
-              // 'sent' only when the gateway says the phone sent it; accepted-but-waiting stays 'pending'.
-              status: !r.ok ? 'failed' as const
-                : r.gatewayMessageId ? statusFromGatewayState(statuses.get(r.gatewayMessageId)?.state) : 'pending' as const,
-              failureReason: !r.ok ? proxyErrorMessage(r.error)
-                : (() => { const st = r.gatewayMessageId ? statuses.get(r.gatewayMessageId) : undefined; return st && (st.state === 'Failed' || st.state === 'Cancelled') ? `${GATEWAY_STATE_LABELS[st.state]}${st.error ? `: ${st.error}` : ''}` : undefined; })(),
+              status: r.ok ? 'pending' as const : 'failed' as const,
+              failureReason: r.ok ? undefined : proxyErrorMessage(r.error),
               gatewayMessageId: r.gatewayMessageId,
-              gatewayState: r.ok ? (r.gatewayMessageId ? statuses.get(r.gatewayMessageId)?.state ?? 'Pending' : 'Pending') : undefined,
+              gatewayState: r.ok ? 'Pending' : undefined,
               channel: 'gateway' as const,
               campaignId: activeCampaignIdRef.current,
             };
           });
+          if (nothingSent) activeCampaignIdRef.current = undefined;
+          else emitLogs(generatedLogs, { stayOnTab: true });
+
+          // Follow the real per-message state on the phone until Delivered/Failed/Cancelled
+          // (backoff 10s→30s, capped at 30 minutes). The webhook updates the history too.
+          const gatewayIds = results.filter(r => r.ok && r.gatewayMessageId).map(r => r.gatewayMessageId!);
+          const latest = new Map<string, GatewayStatus>(gatewayIds.map(id => [id, { id, state: 'Pending' as const }]));
+          const applyStatuses = (m: Map<string, GatewayStatus>) => {
+            for (const st of m.values()) {
+              const cur = latest.get(st.id);
+              if (cur && mergeState(cur.state, st.state)) latest.set(st.id, st);
+            }
+            const counts = countGatewayStates(latest.values());
+            onGatewayStatuses?.(new Map(latest));
+            setSilentProgress(prev => ({
+              ...prev,
+              gatewayCounts: counts,
+              statusText: prev.stage === 'polling' ? `${gatewayCountsText(counts)} — المتابعة مستمرة حتى التسليم أو الفشل (حتى 30 دقيقة)` : gatewayCountsText(counts),
+              results: results.map(r => {
+                const row = toRow(r);
+                const st = r.gatewayMessageId ? latest.get(r.gatewayMessageId) : undefined;
+                if (!st) return row;
+                const failed = st.state === 'Failed' || st.state === 'Cancelled';
+                return { ...row, status: failed ? 'failed' as const : 'success' as const, message: `${GATEWAY_STATE_LABELS[st.state]}${st.error ? `: ${st.error}` : ''}` };
+              }),
+            }));
+          };
+          manualRefreshRef.current = gatewayIds.length && !nothingSent
+            ? async () => applyStatuses(await fetchStatusesOnce(invokeSmsFunction, new Map([...latest].map(([id, st]) => [id, st.state]))))
+            : null;
+          if (gatewayIds.length && !nothingSent) {
+            setSilentProgress(prev => ({ ...prev, stage: 'polling', statusText: `قبلتها البوابة: ${gatewayIds.length} — جاري متابعة الحالة على الهاتف حتى التسليم أو الفشل (حتى 30 دقيقة)...` }));
+            applyStatuses(await pollMessageStatus(invokeSmsFunction, gatewayIds, { signal: abort.signal, onUpdate: applyStatuses }));
+          }
+          silentAbortRef.current = null;
 
           setSilentProgress(prev => ({
             ...prev,
             stage: 'finished',
             statusText: fatalError
               ? `توقف الإرسال: ${proxyErrorMessage(fatalError)}`
-              : `${aborted ? 'أُوقف الإرسال يدوياً. ' : ''}${gatewayCountsText(countGatewayStates(statuses.values()))}`
+              : `${aborted ? 'أُوقف الإرسال/المتابعة يدوياً. ' : ''}${gatewayCountsText(countGatewayStates(latest.values()))}${[...latest.values()].some(st => !['Delivered', 'Failed', 'Cancelled'].includes(st.state)) ? ' — يمكن تحديث الباقي لاحقاً من «تحديث الحالة» أو تلقائياً عبر الويب هوك.' : ''}`
           }));
-
-          // A request-level failure (e.g. gateway not configured) sent nothing: do not record fake history.
-          if (fatalError === 'sms_gateway_not_configured' || fatalError === 'unauthorized' || fatalError === 'not_allowed') {
-            activeCampaignIdRef.current = undefined;
-            return;
-          }
-          emitLogs(generatedLogs);
         })();
       } else {
         // Standard Manual clicks with Pop-ups (Free sequential browser mode)
@@ -1852,7 +1861,21 @@ export default function MessageComposer({
             {/* Modal Header */}
             <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-50">
               <div className="flex items-center gap-2.5">
-                {silentProgress.stage !== 'finished' ? (
+                {silentProgress.stage !== 'sending' && manualRefreshRef.current && (
+                <button
+                  type="button"
+                  id="btn-refresh-gateway-status"
+                  disabled={isManualRefreshing}
+                  onClick={async () => {
+                    setIsManualRefreshing(true);
+                    try { await manualRefreshRef.current?.(); } finally { setIsManualRefreshing(false); }
+                  }}
+                  className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl cursor-pointer font-sans disabled:opacity-50"
+                >
+                  {isManualRefreshing ? 'جاري التحديث...' : 'تحديث الحالة'}
+                </button>
+              )}
+              {silentProgress.stage !== 'finished' ? (
                   <Loader2 className="w-5 h-5 text-indigo-600 animate-spin" />
                 ) : (
                   <ShieldCheck className="w-5 h-5 text-emerald-600" />
@@ -1982,7 +2005,7 @@ export default function MessageComposer({
                   }}
                   className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer font-sans"
                 >
-                  حفظ تقارير البث وإغلاق الشاشة
+                  إغلاق الشاشة (السجل محفوظ في التقارير)
                 </button>
               )}
             </div>

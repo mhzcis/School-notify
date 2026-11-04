@@ -30,6 +30,18 @@ export interface SchoolRepository {
    */
   addLogs(logs: MessageLog[]): Promise<MessageLog[]>;
   clearLogs(): Promise<void>;
+  /**
+   * Updates gateway state/status of stored logs by log id. Never downgrades: an update is skipped
+   * when the stored gateway state is already final or newer. Returns ids actually updated.
+   */
+  updateGatewayStates(updates: GatewayLogUpdate[]): Promise<string[]>;
+}
+
+export interface GatewayLogUpdate {
+  logId: string;
+  gatewayState: import('../../types').MessageLog['gatewayState'];
+  status: MessageLog['status'];
+  failureReason?: string;
 }
 
 export type RepoErrorKind = 'auth' | 'offline' | 'other';

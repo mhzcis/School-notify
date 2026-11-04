@@ -6,6 +6,7 @@ import { MAX_RECIPIENTS_PER_CALL, MAX_STATUS_IDS, SmsItem, validateProxyRequest 
 import { toInternational } from './phone';
 import { chunk } from './repo/mapping';
 
+import { mergeState } from '../../supabase/functions/school-notify-sms-webhook/webhook';
 export { MAX_RECIPIENTS_PER_CALL, MAX_BODY_CHARS } from '../../supabase/functions/school-notify-sms/validate';
 
 export interface ProxyItemResult {
@@ -50,7 +51,7 @@ export interface GatewayStatus {
 /** Recipients per Edge Function call; small batches are gentler on the sending phone/SIM. */
 export const DEFAULT_BATCH_SIZE = 5;
 /** Default pause between batches. */
-export const DEFAULT_BATCH_DELAY_SEC = 10;
+export const DEFAULT_BATCH_DELAY_SEC = 2;
 
 export interface SendOptions {
   batchSize?: number;
@@ -127,61 +128,101 @@ export async function sendViaProxy(
   return { results };
 }
 
-/** States after which we stop polling a message. */
-export const FINAL_GATEWAY_STATES: GatewayState[] = ['Sent', 'Delivered', 'Failed', 'Cancelled'];
+/** States after which we stop polling a message (Sent is NOT final: we wait for the delivery report). */
+export const FINAL_GATEWAY_STATES: GatewayState[] = ['Delivered', 'Failed', 'Cancelled'];
+
+export const POLL_INITIAL_INTERVAL_MS = 10_000;
+export const POLL_MAX_INTERVAL_MS = 30_000;
+export const POLL_TIMEOUT_MS = 30 * 60_000;
 
 export interface PollOptions {
+  /** First wait (default 10s); grows ×1.5 per round up to maxIntervalMs (default 30s). */
   intervalMs?: number;
-  /** Upper bound for the whole polling run. */
+  maxIntervalMs?: number;
+  /** Upper bound for the whole polling run (default 30 min). */
   timeoutMs?: number;
   signal?: AbortSignal;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   onUpdate?: (statuses: Map<string, GatewayStatus>) => void;
+  /** Known states (e.g. from history) — never downgraded. */
+  initial?: Map<string, GatewayState>;
+}
+
+const STOP_ERRORS = ['unauthorized', 'not_allowed', 'sms_gateway_not_configured'];
+
+/**
+ * One status lookup round for the given ids (chunked by MAX_STATUS_IDS), merged into `map`
+ * with the no-downgrade rule. Returns true when polling should stop (auth/config problem).
+ */
+export async function refreshStatusesOnce(
+  invoke: ProxyInvoker,
+  map: Map<string, GatewayStatus>,
+  ids: string[]
+): Promise<boolean> {
+  let stop = false;
+  for (const part of chunk(ids, MAX_STATUS_IDS)) {
+    let res: any;
+    try {
+      res = await invoke({ action: 'messageStatus', ids: part });
+    } catch {
+      res = { ok: false, error: 'offline' };
+    }
+    if (!res?.ok) {
+      if (STOP_ERRORS.includes(res?.error)) stop = true;
+      continue;
+    }
+    for (const st of (res.statuses ?? []) as GatewayStatus[]) {
+      if (!map.has(st.id)) continue;
+      if (st.state === 'Unknown' && st.error === 'gateway_auth_failed') stop = true;
+      // Unknown (temporary lookup error) never overwrites; older states never downgrade.
+      if (st.state === 'Unknown') continue;
+      const cur = map.get(st.id)!;
+      const merged = mergeState(cur.state, st.state);
+      if (merged) map.set(st.id, { id: st.id, state: merged, ...(st.error ? { error: st.error } : {}) });
+    }
+  }
+  return stop;
+}
+
+/** Convenience: single lookup for ids with known current states. */
+export async function fetchStatusesOnce(
+  invoke: ProxyInvoker,
+  current: Map<string, GatewayState>
+): Promise<Map<string, GatewayStatus>> {
+  const map = new Map<string, GatewayStatus>([...current].map(([id, state]) => [id, { id, state }]));
+  const open = [...map.values()].filter(s => !FINAL_GATEWAY_STATES.includes(s.state)).map(s => s.id);
+  if (open.length) await refreshStatusesOnce(invoke, map, open);
+  return map;
 }
 
 /**
- * Polls `messageStatus` for gateway ids until each is final (Sent/Delivered/Failed/Cancelled),
- * the time bound is reached, or aborted. Ids never polled successfully stay 'Pending'.
+ * Polls SMSGate until every message is Delivered/Failed/Cancelled, with backoff 10s→30s and an
+ * overall cap (default 30 min). Messages still open at the end stay in their last known state.
  */
 export async function pollMessageStatus(
   invoke: ProxyInvoker,
   gatewayIds: string[],
   opts: PollOptions = {}
 ): Promise<Map<string, GatewayStatus>> {
-  const intervalMs = opts.intervalMs ?? 10_000;
-  const timeoutMs = opts.timeoutMs ?? 120_000;
+  let interval = Math.max(1, opts.intervalMs ?? POLL_INITIAL_INTERVAL_MS);
+  const maxInterval = Math.max(interval, opts.maxIntervalMs ?? POLL_MAX_INTERVAL_MS);
+  const timeoutMs = opts.timeoutMs ?? POLL_TIMEOUT_MS;
   const wait = opts.sleep ?? sleep;
   const ids = [...new Set(gatewayIds.filter(Boolean))];
-  const map = new Map<string, GatewayStatus>(ids.map(id => [id, { id, state: 'Pending' as GatewayState }]));
-  const rounds = Math.max(1, Math.floor(timeoutMs / Math.max(1, intervalMs)));
-  for (let round = 0; round < rounds; round++) {
-    await wait(intervalMs, opts.signal);
+  const map = new Map<string, GatewayStatus>(
+    ids.map(id => [id, { id, state: (opts.initial?.get(id) ?? 'Pending') as GatewayState }])
+  );
+  const isOpen = (id: string) => !FINAL_GATEWAY_STATES.includes(map.get(id)!.state);
+  let elapsed = 0;
+  while (ids.some(isOpen)) {
+    if (elapsed + interval > timeoutMs && elapsed > 0) break;
+    await wait(interval, opts.signal);
+    elapsed += interval;
     if (opts.signal?.aborted) break;
-    const open = ids.filter(id => !FINAL_GATEWAY_STATES.includes(map.get(id)!.state));
-    if (!open.length) break;
-    let stop = false;
-    for (const part of chunk(open, MAX_STATUS_IDS)) {
-      let res: any;
-      try {
-        res = await invoke({ action: 'messageStatus', ids: part });
-      } catch {
-        res = { ok: false, error: 'offline' };
-      }
-      if (!res?.ok) {
-        // Session/permission/config problems will not fix themselves: stop polling.
-        if (['unauthorized', 'not_allowed', 'sms_gateway_not_configured'].includes(res?.error)) stop = true;
-        continue;
-      }
-      for (const st of (res.statuses ?? []) as GatewayStatus[]) {
-        if (!map.has(st.id)) continue;
-        if (st.state === 'Unknown' && st.error === 'gateway_auth_failed') stop = true;
-        // Unknown (temporary lookup error) never overwrites a known state.
-        if (st.state !== 'Unknown') map.set(st.id, { id: st.id, state: st.state, ...(st.error ? { error: st.error } : {}) });
-      }
-    }
+    const stop = await refreshStatusesOnce(invoke, map, ids.filter(isOpen));
     opts.onUpdate?.(new Map(map));
-    if (stop) break;
-    if (ids.every(id => FINAL_GATEWAY_STATES.includes(map.get(id)!.state))) break;
+    if (stop || elapsed >= timeoutMs) break;
+    interval = Math.min(maxInterval, Math.round(interval * 1.5));
   }
   return map;
 }

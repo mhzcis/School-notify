@@ -22,7 +22,8 @@ import {
   studentToRow,
   templateToRow,
 } from './mapping';
-import { AppData, ProgressFn, RepoError, SchoolRepository, UPSERT_CHUNK_SIZE } from './types';
+import { AppData, GatewayLogUpdate, ProgressFn, RepoError, SchoolRepository, UPSERT_CHUNK_SIZE } from './types';
+import { mergeState } from '../../../supabase/functions/school-notify-sms-webhook/webhook';
 
 const PAGE = 1000;
 
@@ -187,5 +188,27 @@ export class SupabaseSchoolRepository implements SchoolRepository {
     // Immediate-send grouping rows have no other purpose once their messages are gone.
     const { error: e2 } = await this.sb.from('campaigns').delete().eq('owner', this.owner).eq('meta->>kind', 'immediate');
     if (e2) throw toRepoError(e2);
+  }
+
+  async updateGatewayStates(updates: GatewayLogUpdate[]): Promise<string[]> {
+    const done: string[] = [];
+    try {
+      for (const u of updates) {
+        if (!u.gatewayState) continue;
+        const { data, error } = await this.sb.from('messages').select('meta').eq('id', u.logId).maybeSingle();
+        if (error) throw toRepoError(error);
+        if (!data) continue;
+        const meta = ((data as { meta: Record<string, unknown> | null }).meta ?? {}) as Record<string, unknown>;
+        if (!mergeState(meta.gatewayState as string | undefined, u.gatewayState)) continue;
+        const patch: Record<string, unknown> = { status: u.status, meta: { ...meta, gatewayState: u.gatewayState } };
+        if (u.failureReason) patch.error = u.failureReason;
+        const { error: upErr } = await this.sb.from('messages').update(patch).eq('id', u.logId);
+        if (upErr) throw toRepoError(upErr);
+        done.push(u.logId);
+      }
+    } catch (err) {
+      throw toRepoError(err);
+    }
+    return done;
   }
 }

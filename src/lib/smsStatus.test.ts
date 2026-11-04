@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GATEWAY_ID_RE, MAX_STATUS_IDS, validateProxyRequest } from '../../supabase/functions/school-notify-sms/validate';
 import { parseMessageState, sendOne, statusMany, SMSGATE_STATUS_URL } from '../../supabase/functions/school-notify-sms/gateway';
 import {
-  countGatewayStates, gatewayCountsText, pollMessageStatus, sendViaProxy, sleep, DEFAULT_BATCH_SIZE,
+  countGatewayStates, fetchStatusesOnce, gatewayCountsText, pollMessageStatus, sendViaProxy, sleep, DEFAULT_BATCH_SIZE,
 } from './smsProxy';
 import { statusFromGatewayState } from './logStatus';
 import { logToRow, rowToLog } from './repo/mapping';
@@ -144,14 +144,15 @@ describe('pollMessageStatus', () => {
     }));
     const onUpdate = vi.fn();
     const p = pollMessageStatus(invoke as any, ['g1', 'g2', 'g3'], { intervalMs: 5_000, timeoutMs: 120_000, onUpdate });
-    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     const map = await p;
-    expect(invoke.mock.calls.map(c => (c[0] as any).ids)).toEqual([['g1', 'g2', 'g3'], ['g1', 'g3'], ['g3']]);
-    expect([...map.values()].map(s => s.state)).toEqual(['Sent', 'Failed', 'Delivered']);
+    // Sent is not final: g1 keeps being polled until Delivered.
+    expect(invoke.mock.calls.map(c => (c[0] as any).ids)).toEqual([['g1', 'g2', 'g3'], ['g1', 'g3'], ['g1', 'g3']]);
+    expect([...map.values()].map(s => s.state)).toEqual(['Delivered', 'Failed', 'Delivered']);
     expect(map.get('g2')!.error).toBe('timeout');
     expect(onUpdate).toHaveBeenCalledTimes(3);
     const c = countGatewayStates(map.values());
-    expect(c).toEqual({ accepted: 3, pending: 0, sent: 1, delivered: 1, failed: 1 });
+    expect(c).toEqual({ accepted: 3, pending: 0, sent: 0, delivered: 2, failed: 1 });
     expect(gatewayCountsText(c)).toContain('قبلتها البوابة: 3');
   });
 
@@ -161,8 +162,27 @@ describe('pollMessageStatus', () => {
     const p = pollMessageStatus(invoke as any, ['g1'], { intervalMs: 10_000, timeoutMs: 30_000 });
     await vi.advanceTimersByTimeAsync(60_000);
     const map = await p;
-    expect(invoke).toHaveBeenCalledTimes(3);
+    // waits 10s, then 15s (=25s); the next 22.5s wait would exceed the 30s cap
+    expect(invoke).toHaveBeenCalledTimes(2);
     expect(map.get('g1')!.state).toBe('Pending');
+  });
+
+  it('backs off 10s -> 15s -> 22.5s -> 30s (capped) and defaults to a 30 min cap', async () => {
+    const waits: number[] = [];
+    const invoke = vi.fn(async (body: any) => ({ ok: true as const, statuses: body.ids.map((id: string) => ({ id, state: 'Sent' })) }));
+    await pollMessageStatus(invoke as any, ['g1'], { sleep: async (ms: number) => { waits.push(ms); } });
+    expect(waits.slice(0, 5)).toEqual([10_000, 15_000, 22_500, 30_000, 30_000]);
+    const total = waits.reduce((a, b) => a + b, 0);
+    expect(total).toBeLessThanOrEqual(30 * 60_000);
+    expect(total).toBeGreaterThan(29 * 60_000);
+  });
+
+  it('never downgrades a known state and skips already-final ids', async () => {
+    const invoke = vi.fn(async (body: any) => ({ ok: true as const, statuses: body.ids.map((id: string) => ({ id, state: 'Processed' })) }));
+    const map = await fetchStatusesOnce(invoke as any, new Map([['g1', 'Sent'], ['g2', 'Delivered']] as any));
+    expect(invoke.mock.calls[0][0]).toEqual({ action: 'messageStatus', ids: ['g1'] });
+    expect(map.get('g1')!.state).toBe('Sent');
+    expect(map.get('g2')!.state).toBe('Delivered');
   });
 
   it('stops on unauthorized and never overwrites with Unknown', async () => {
@@ -177,7 +197,7 @@ describe('pollMessageStatus', () => {
 
   it('chunks more than 50 ids per request', async () => {
     const ids = Array.from({ length: 60 }, (_, i) => `g${i}`);
-    const invoke = vi.fn(async (body: any) => ({ ok: true as const, statuses: body.ids.map((id: string) => ({ id, state: 'Sent' })) }));
+    const invoke = vi.fn(async (body: any) => ({ ok: true as const, statuses: body.ids.map((id: string) => ({ id, state: 'Delivered' })) }));
     await pollMessageStatus(invoke as any, ids, { sleep: async () => {} });
     expect(invoke.mock.calls.map(c => (c[0] as any).ids.length)).toEqual([50, 10]);
   });

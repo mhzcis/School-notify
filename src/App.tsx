@@ -19,7 +19,11 @@ import SmsGatewaySettings, { GatewayStatus } from './components/SmsGatewaySettin
 import BackupPanel from './components/BackupPanel';
 import { RepoError, SchoolRepository, repoErrorMessage } from './lib/repo/types';
 import { newId } from './lib/repo/mapping';
-import type { ProxyResponse } from './lib/smsProxy';
+import { fetchStatusesOnce, FINAL_GATEWAY_STATES, GATEWAY_STATE_LABELS } from './lib/smsProxy';
+import type { ProxyInvoker, ProxyResponse, GatewayStatus as SmsGatewayState, GatewayState } from './lib/smsProxy';
+import { invokeSmsFunction } from './lib/supabase';
+import { logStatusForState, mergeState } from '../supabase/functions/school-notify-sms-webhook/webhook';
+import type { GatewayLogUpdate } from './lib/repo/types';
 import type { AuthUser } from './auth/authService';
 import { UI_PREF_KEYS } from './lib/smsPrefs';
 
@@ -50,11 +54,13 @@ export interface AppProps {
   onAuthFailure?: () => void;
   /** Gateway status probe (defaults to the Edge Function in production wiring). */
   checkGateway?: () => Promise<ProxyResponse>;
+  /** Edge Function invoker used for "تحديث الحالة" (defaults to the real one). */
+  invokeSms?: ProxyInvoker;
 }
 
 const SEEDED_KEY = (uid: string) => `sn_default_templates_seeded:${uid}`;
 
-export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway }: AppProps) {
+export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway, invokeSms = invokeSmsFunction }: AppProps) {
   // Navigation / UI States
   const [composerPrefill, setComposerPrefill] = useState<ComposerPrefill | null>(null);
   const [activeTab, setActiveTab] = useState<'overview' | 'compose' | 'importer' | 'templates' | 'scheduler' | 'reports' | 'sms-config' | 'backup'>('overview');
@@ -89,6 +95,9 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
   const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
   const [logs, setLogs] = useState<MessageLog[]>([]);
+  const logsRef = useRef<MessageLog[]>([]);
+  logsRef.current = logs;
+  const [isRefreshingStatuses, setIsRefreshingStatuses] = useState(false);
   const studentsRef = useRef<Student[]>([]);
   studentsRef.current = students;
 
@@ -244,7 +253,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
   };
 
   // 5. Send Immediate Message Trigger (Evaluated and sent directly)
-  const handleSendImmediate = async (generatedLogs: MessageLog[]) => {
+  const handleSendImmediate = async (generatedLogs: MessageLog[], opts?: { stayOnTab?: boolean }) => {
     const summary = summarizeLogs(generatedLogs);
     // A scheduled campaign is completed only when real messages for it were actually handed over
     const campaignIds = new Set(
@@ -258,7 +267,9 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
         .map(item => ({ ...item, status: 'completed' as const }));
       if (toComplete.length) await repo.upsertCampaigns(toComplete);
       triggerNotification(
-        `تم تسليم (${summary.successful}) رسالة للإرسال${summary.failed ? ` وفشلت (${summary.failed})` : ''}. ملاحظة: «أُرسلت» لا تعني تأكيد الاستلام على هاتف ولي الأمر.`,
+        summary.pending
+          ? `قبلت البوابة (${summary.pending}) رسالة وحُفظت في السجل بانتظار الإرسال${summary.failed ? `، وفشلت (${summary.failed})` : ''}. ستتحدث الحالة تلقائياً.`
+          : `تم تسليم (${summary.successful}) رسالة للإرسال${summary.failed ? ` وفشلت (${summary.failed})` : ''}. ملاحظة: «أُرسلت» لا تعني تأكيد الاستلام على هاتف ولي الأمر.`,
         summary.failed ? 'info' : 'success'
       );
     } catch (err) {
@@ -272,7 +283,59 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
         prev.map(item => campaignIds.has(item.id) && item.status === 'pending' ? { ...item, status: 'completed' as const } : item)
       );
     }
-    setActiveTab('reports');
+    if (!opts?.stayOnTab) setActiveTab('reports');
+  };
+
+  // 5b. Apply gateway states (by SMSGate message id) to history — no downgrade, persisted.
+  const handleGatewayStatuses = async (statuses: Map<string, SmsGatewayState>) => {
+    const updates: GatewayLogUpdate[] = [];
+    for (const l of logsRef.current) {
+      const st = l.gatewayMessageId ? statuses.get(l.gatewayMessageId) : undefined;
+      if (!st) continue;
+      const next = mergeState(l.gatewayState, st.state);
+      if (!next) continue;
+      updates.push({
+        logId: l.id,
+        gatewayState: next,
+        status: logStatusForState(next),
+        failureReason: next === 'Failed' || next === 'Cancelled' ? `${GATEWAY_STATE_LABELS[next]}${st.error ? `: ${st.error}` : ''}` : undefined,
+      });
+    }
+    if (!updates.length) return 0;
+    const byId = new Map(updates.map(u => [u.logId, u]));
+    setLogs(prev => prev.map(l => {
+      const u = byId.get(l.id);
+      return u ? { ...l, gatewayState: u.gatewayState, status: u.status, ...(u.failureReason ? { failureReason: u.failureReason } : {}) } : l;
+    }));
+    try {
+      await repo.updateGatewayStates(updates);
+    } catch (err) {
+      if (err instanceof RepoError && err.kind === 'auth') onAuthFailure?.();
+    }
+    return updates.length;
+  };
+
+  // 5c. "تحديث الحالة" in reports: re-query SMSGate for every non-final message with a stored gateway id.
+  const handleRefreshStatuses = async () => {
+    const open = new Map<string, GatewayState>();
+    for (const l of logsRef.current) {
+      if (l.gatewayMessageId && !FINAL_GATEWAY_STATES.includes((l.gatewayState ?? 'Pending') as GatewayState)) {
+        open.set(l.gatewayMessageId, (l.gatewayState ?? 'Pending') as GatewayState);
+      }
+    }
+    if (!open.size) {
+      triggerNotification('لا توجد رسائل بانتظار تحديث الحالة.', 'info');
+      return;
+    }
+    setIsRefreshingStatuses(true);
+    try {
+      const n = await handleGatewayStatuses(await fetchStatusesOnce(invokeSms, open));
+      triggerNotification(n ? `تم تحديث حالة (${n}) رسالة.` : 'لا تغيير في الحالة بعد.', 'info');
+    } catch {
+      triggerNotification('تعذر تحديث الحالة الآن. حاول لاحقاً.', 'error');
+    } finally {
+      setIsRefreshingStatuses(false);
+    }
   };
 
   // 6. Schedule Campaign for date/time
@@ -603,6 +666,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               students={students}
               templates={templates}
               onSendImmediate={handleSendImmediate}
+              onGatewayStatuses={m => { void handleGatewayStatuses(m); }}
               prefill={composerPrefill}
               onPrefillConsumed={() => setComposerPrefill(null)}
               onScheduleMessage={handleScheduleMessage}
@@ -656,6 +720,8 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
             <ReportsPanel
               logs={logs}
               onClearLogs={handleClearLogs}
+              onRefreshStatuses={handleRefreshStatuses}
+              isRefreshingStatuses={isRefreshingStatuses}
             />
           )}
         </div>

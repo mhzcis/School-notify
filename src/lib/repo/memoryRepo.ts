@@ -1,10 +1,11 @@
+import { mergeState } from '../../../supabase/functions/school-notify-sms-webhook/webhook';
 /**
  * In-memory SchoolRepository fake for tests. Mirrors the Supabase semantics that matter:
  * dedupe by national id, chunked upserts (recorded in `studentBatches`), immediate campaigns.
  */
 import type { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../../types';
 import { chunk, dedupeStudents, prepareLogs } from './mapping';
-import { AppData, ProgressFn, RepoError, SchoolRepository, UPSERT_CHUNK_SIZE } from './types';
+import { AppData, ProgressFn, RepoError, SchoolRepository, UPSERT_CHUNK_SIZE, GatewayLogUpdate } from './types';
 
 export class InMemorySchoolRepository implements SchoolRepository {
   students = new Map<string, Student>();
@@ -104,5 +105,17 @@ export class InMemorySchoolRepository implements SchoolRepository {
     this.maybeFail();
     this.logs.clear();
     for (const [id, c] of this.campaigns) if (c.kind === 'immediate') this.campaigns.delete(id);
+  }
+
+  async updateGatewayStates(updates: GatewayLogUpdate[]): Promise<string[]> {
+    this.maybeFail();
+    const done: string[] = [];
+    for (const u of updates) {
+      const cur = this.logs.get(u.logId);
+      if (!cur || !u.gatewayState || !mergeState(cur.gatewayState, u.gatewayState)) continue;
+      this.logs.set(u.logId, { ...cur, gatewayState: u.gatewayState, status: u.status, ...(u.failureReason ? { failureReason: u.failureReason } : {}) });
+      done.push(u.logId);
+    }
+    return done;
   }
 }

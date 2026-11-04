@@ -44,13 +44,13 @@ export function writePref(key: string, value: string): void {
   }
 }
 
-/** Seconds to wait between gateway batches (0–300, default 10). */
+/** Seconds to wait between gateway batches (0–300, default 2). */
 export function readBatchDelaySec(): number {
-  const n = Number(readPref(UI_PREF_KEYS.smsBatchDelaySec, '10'));
-  return Number.isFinite(n) ? Math.min(300, Math.max(0, Math.round(n))) : 10;
+  const n = Number(readPref(UI_PREF_KEYS.smsBatchDelaySec, '2'));
+  return Number.isFinite(n) ? Math.min(300, Math.max(0, Math.round(n))) : 2;
 }
 
 export function writeBatchDelaySec(sec: number): void {
-  const n = Number.isFinite(sec) ? Math.min(300, Math.max(0, Math.round(sec))) : 10;
+  const n = Number.isFinite(sec) ? Math.min(300, Math.max(0, Math.round(sec))) : 2;
   writePref(UI_PREF_KEYS.smsBatchDelaySec, String(n));
 }
