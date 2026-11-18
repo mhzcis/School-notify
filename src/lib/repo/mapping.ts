@@ -51,10 +51,46 @@ export interface StudentRow {
 
 const STUDENT_COLUMNS = new Set(['id', 'name', 'parentName', 'phone', 'grade']);
 
+/** Must never be written to students.extra (credentials belong in a later Phase 3 table). */
+export const FORBIDDEN_STUDENT_KEYS = ['notes', 'moodlePassword', 'moodleUsername'] as const;
+
+export function stripForbiddenStudentFields<T extends Record<string, any>>(obj: T): T {
+  const out = { ...obj };
+  for (const k of FORBIDDEN_STUDENT_KEYS) delete out[k];
+  return out;
+}
+
+/**
+ * Merge an incoming (possibly partial) student onto an existing cloud row.
+ * Defined incoming fields win; omitted keys such as phone2 / previousYearGPA / section are kept.
+ * Forbidden keys (notes / Moodle credentials) are never present in the result.
+ */
+export function mergeIncomingStudent(existing: Student | undefined, incoming: Partial<Student> & { id: string }): Student {
+  const id = String(incoming.id).trim();
+  const base: Student = existing
+    ? { ...existing, id }
+    : {
+        id,
+        name: '',
+        parentName: '',
+        phone: '',
+        grade: '',
+        section: '',
+      };
+  for (const [k, v] of Object.entries(incoming)) {
+    if (k === 'id') continue;
+    if ((FORBIDDEN_STUDENT_KEYS as readonly string[]).includes(k)) continue; // never accept incoming notes/credentials
+    if (v !== undefined) (base as any)[k] = v;
+  }
+  base.id = id;
+  // Existing notes/credentials (if any) are left untouched; they are not re-imported.
+  return base;
+}
+
 export function studentToRow(s: Student, owner: string): StudentRow {
   const extra: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(s)) {
-    if (!STUDENT_COLUMNS.has(k) && v !== undefined) extra[k] = v;
+    if (!STUDENT_COLUMNS.has(k) && v !== undefined && !(FORBIDDEN_STUDENT_KEYS as readonly string[]).includes(k)) extra[k] = v;
   }
   return {
     owner,
@@ -135,6 +171,8 @@ export const campaignToRow = (c: ScheduledMessage, owner: string): CampaignRow =
     phoneTarget: c.phoneTarget,
     scheduledTime: c.scheduledTime,
     totalRecipients: c.totalRecipients,
+    ...(c.isTest ? { isTest: true } : {}),
+    ...(c.archived ? { archived: true } : {}),
   },
 });
 
@@ -153,8 +191,22 @@ export const rowToCampaign = (r: CampaignRow): ScheduledMessage => {
     phoneTarget: m.phoneTarget,
     scheduledTime: m.scheduledTime ?? r.created_at ?? '',
     totalRecipients: Number(m.totalRecipients ?? 0),
+    isTest: Boolean(m.isTest),
+    archived: Boolean(m.archived),
   };
 };
+
+export interface CampaignFlags {
+  id: string;
+  isTest: boolean;
+  archived: boolean;
+  kind?: string;
+}
+
+export function campaignFlagsFromRow(r: CampaignRow): CampaignFlags {
+  const m = (r.meta || {}) as any;
+  return { id: r.id, isTest: Boolean(m.isTest), archived: Boolean(m.archived), kind: m.kind };
+}
 
 // ---------------- messages ----------------
 export interface MessageRow {
@@ -189,6 +241,8 @@ export const logToRow = (l: MessageLog, owner: string, campaignId: string, stude
     channel: l.channel,
     ...(l.gatewayMessageId ? { gatewayMessageId: l.gatewayMessageId } : {}),
     ...(l.gatewayState ? { gatewayState: l.gatewayState } : {}),
+    ...(l.contentTemplate ? { contentTemplate: l.contentTemplate } : {}),
+    ...(l.isTest ? { isTest: true } : {}),
   },
 });
 
@@ -210,6 +264,8 @@ export const rowToLog = (r: MessageRow): MessageLog => {
     channel: m.channel,
     ...(m.gatewayMessageId ? { gatewayMessageId: m.gatewayMessageId } : {}),
     ...(m.gatewayState ? { gatewayState: m.gatewayState } : {}),
+    ...(m.contentTemplate ? { contentTemplate: m.contentTemplate as string } : {}),
+    ...(m.isTest ? { isTest: true } : {}),
   };
 };
 

@@ -6,10 +6,10 @@
 import React, { useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { Student } from '../types';
-import { MappedField, mapRowToStudentFields, resolveHeaderMap } from '../lib/excelMapping';
-import { checkPhone, isSendablePhone } from '../lib/phone';
+import { ColumnAssignment, MappedField, applyColumnOverrides, mapRowToStudentFields, resolveHeaderMap } from '../lib/excelMapping';
+import { checkPhone, isSendablePhone, PHONE_PROBLEM_LABELS, PhoneProblem } from '../lib/phone';
 import { matchNames } from '../lib/nameMatching';
-import SecretText from './SecretText';
+import ColumnMappingReview from './ColumnMappingReview';
 import { 
   FileUp, 
   Download, 
@@ -49,6 +49,15 @@ export default function ExcelImporter({
   const [successCount, setSuccessCount] = useState<number | null>(null);
   const [parsedData, setParsedData] = useState<Student[]>([]);
   const [dragActive, setDragActive] = useState<boolean>(false);
+  const [mappingDraft, setMappingDraft] = useState<{
+    headers: string[];
+    rows: Record<string, unknown>[];
+    autoMap: Record<string, MappedField>;
+    overrides: Record<string, ColumnAssignment>;
+  } | null>(null);
+  const [phoneAck, setPhoneAck] = useState(false);
+  const [phoneIssues, setPhoneIssues] = useState<Array<{ rowNumber: number; identity: string; problem: PhoneProblem }>>([]);
+  const [missingIdCount, setMissingIdCount] = useState(0);
 
   // Matching Mode States
   const [matchError, setMatchError] = useState<string | null>(null);
@@ -97,10 +106,7 @@ export default function ExcelImporter({
         "شبكة  الأمان الاجتماعي": "نعم تشمل العائلة",
         "هل لديه مرض مزمن": "لا يوجد",
         "يسكن في المخيم": "نعم",
-        "معدل الطالب العام السابق": "92.4",
-        "ملاحظات أو مستحقات": "الرسوم المتبقية: 500 ريال",
-        "اسم المستخدم": "demo.student1",
-        "كلمة المرور": "Demo-Pass-1"
+        "معدل الطالب العام السابق": "92.4"
       },
       {
         "المنطقة": "منطقة الوسطى",
@@ -132,10 +138,7 @@ export default function ExcelImporter({
         "شبكة  الأمان الاجتماعي": "لا تشمل",
         "هل لديه مرض مزمن": "لا يوجد",
         "يسكن في المخيم": "لا",
-        "معدل الطالب العام السابق": "95.8",
-        "ملاحظات أو مستحقات": "الرسوم المتبقية: لا يوجد",
-        "اسم المستخدم": "demo.student2",
-        "كلمة المرور": "Demo-Pass-2"
+        "معدل الطالب العام السابق": "95.8"
       }
     ];
 
@@ -172,25 +175,16 @@ export default function ExcelImporter({
       return null;
     }
 
-    if (!student.id) {
-      // Long random id: the old 4-digit id could collide and overwrite another student on merge.
-      student.id = student.idNumber || 'ST' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    if (!student.id && student.idNumber) student.id = student.idNumber;
+    // Do not invent parentName, section, or an empty phone: omitted fields must stay
+    // omitted so a later upsert can merge and keep existing cloud values (e.g. phone2).
+    if (student.phone) {
+      const primary = checkPhone(student.phone);
+      if (primary.valid) student.phone = primary.local;
     }
-    if (!student.parentName) {
-      student.parentName = student.name.split(' ').slice(1).join(' ') || "ولي الأمر";
-    }
-    if (!student.section) {
-      student.section = "أ";
-    }
-    // Never invent a phone number. Normalise valid mobiles (e.g. Excel dropped the leading 0);
-    // keep invalid/missing values as-is so the student is flagged and excluded from sending.
-    const primary = checkPhone(student.phone);
-    if (primary.valid) {
-      student.phone = primary.local;
-    } else if (!student.phone && isSendablePhone(student.phone2)) {
-      student.phone = checkPhone(student.phone2).local;
-    } else if (!student.phone) {
-      student.phone = '';
+    if (student.phone2) {
+      const secondary = checkPhone(student.phone2);
+      if (secondary.valid) student.phone2 = secondary.local;
     }
 
     return student as Student;
@@ -280,41 +274,14 @@ export default function ExcelImporter({
           return;
         }
 
-        const headerMap = resolveHeaderMap(headers);
-        const validStudents: Student[] = [];
-        let failedRows = 0;
-
-        objectsToParse.forEach((row: any) => {
-          const mapped = mapHeadersToStudentFields(row, headerMap);
-          if (mapped) {
-            validStudents.push(mapped as Student);
-          } else {
-            failedRows++;
-          }
-        });
-
-        if (validStudents.length === 0) {
-          const detectedSample = headers.filter(Boolean).slice(0, 12).join(" | ");
-          setError(`فشل في استيراد الطلاب. يرجى مراجعة مسميات الأعمدة. الأعمدة المكتشفة بالملف الحالي هي: (${detectedSample} ...). يرجى التأكد من توفر عمود "اسم الطالب" وعمود "الصف" تحت هذه المسميات الصريحة.`);
-          return;
-        }
-
-        setParsedData(validStudents);
-        setSuccessCount(validStudents.length);
-        const warnings: string[] = [];
-        if (failedRows > 0) {
-          warnings.push(`تم التعرف على بنية البيانات بنجاح، ولكن تم تخطي عدد (${failedRows}) أسطر لعدم اكتمال بياناتها الأساسية كالصف أو اسم الطالب.`);
-        }
-        const noPhone = validStudents.filter(s => !isSendablePhone(s.phone));
-        if (noPhone.length > 0) {
-          warnings.push(`تنبيه: (${noPhone.length}) طالب بدون رقم جوال صالح (${noPhone.slice(0, 5).map(s => s.name).join('، ')}${noPhone.length > 5 ? '، ...' : ''}). سيتم استيرادهم لكن سيُستبعدون من الإرسال حتى تصحيح الرقم.`);
-        }
-        const withMoodleUser = validStudents.filter(s => s.moodleUsername).length;
-        const withMoodlePass = validStudents.filter(s => s.moodlePassword).length;
-        if (withMoodleUser || withMoodlePass) {
-          warnings.push(`ملاحظة: تم استيراد بيانات مودل (اسم مستخدم: ${withMoodleUser}، كلمة مرور: ${withMoodlePass}). كلمات المرور تُحفظ كنص عادي داخل هذا المتصفح فقط وتظهر مخفية في القوائم.`);
-        }
-        if (warnings.length) setError(warnings.join(' '));
+        const autoMap = resolveHeaderMap(headers);
+        setPhoneAck(false);
+        setPhoneIssues([]);
+        setMissingIdCount(0);
+        setParsedData([]);
+        setSuccessCount(null);
+        setMappingDraft({ headers, rows: objectsToParse, autoMap, overrides: {} });
+        setError('راجع مطابقة الأعمدة ثم اضغط «متابعة» قبل الحفظ. أعمدة الملاحظات وكلمات المرور لن تُستورد.');
       } catch (err: any) {
         setError(`حدث خطأ أثناء معالجة ملف الإكسل: ${err.message || err}`);
       }
@@ -354,25 +321,86 @@ export default function ExcelImporter({
     }
   };
 
-  const executeImport = () => {
-    if (parsedData.length > 0) {
-      onImportComplete(parsedData);
-      setParsedData([]);
-      setSuccessCount(null);
-      setError(null);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
+  const applyConfirmedMapping = () => {
+    if (!mappingDraft) return;
+    const headerMap = applyColumnOverrides(mappingDraft.headers, mappingDraft.autoMap, mappingDraft.overrides);
+    const validStudents: Student[] = [];
+    const issues: Array<{ rowNumber: number; identity: string; problem: PhoneProblem }> = [];
+    let failedRows = 0;
+    let missingIds = 0;
+
+    mappingDraft.rows.forEach((row, idx) => {
+      const mapped = mapHeadersToStudentFields(row, headerMap);
+      if (!mapped) {
+        failedRows++;
+        return;
       }
+      if (!mapped.id) {
+        mapped.id = 'ST' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+        missingIds++;
+      }
+      // Ensure required strings exist for the Student type without inventing extra fields.
+      if (!mapped.parentName) mapped.parentName = '';
+      if (!mapped.section) mapped.section = mapped.section;
+      if (!mapped.phone) mapped.phone = mapped.phone ?? '';
+      validStudents.push(mapped as Student);
+      const c = checkPhone(mapped.phone);
+      if (!c.valid) {
+        issues.push({
+          rowNumber: idx + 1,
+          identity: String(mapped.name || mapped.id || `صف ${idx + 1}`),
+          problem: c.problem ?? 'invalid',
+        });
+      }
+    });
+
+    if (validStudents.length === 0) {
+      const detectedSample = mappingDraft.headers.filter(Boolean).slice(0, 12).join(' | ');
+      setError(`فشل في استيراد الطلاب. يرجى مراجعة مطابقة الأعمدة. الأعمدة المكتشفة: (${detectedSample} ...). يلزم عمود لاسم الطالب وعمود للصف.`);
+      return;
     }
+
+    setParsedData(validStudents);
+    setSuccessCount(validStudents.length);
+    setPhoneIssues(issues);
+    setMissingIdCount(missingIds);
+    setPhoneAck(issues.length === 0);
+    setMappingDraft(null);
+    const warnings: string[] = [];
+    if (failedRows > 0) warnings.push(`تم تخطي (${failedRows}) سطر لعدم اكتمال الاسم أو الصف.`);
+    if (missingIds > 0) warnings.push(`تنبيه: (${missingIds}) صف بدون رقم هوية؛ أُنشئ معرف مؤقت. يُفضّل إدخال الهوية لاحقاً من شاشة التعديل.`);
+    if (issues.length > 0) {
+      warnings.push(`وُجد (${issues.length}) رقم غير صالح أو مفقود. راجع التقرير أدناه وأكّد الاطلاع قبل الحفظ. هؤلاء سيُستبعدون من الإرسال حتى تصحيح الرقم.`);
+    }
+    warnings.push('لن تُستورد أعمدة الملاحظات أو اسم المستخدم أو كلمة المرور إلى سجل الطلاب.');
+    setError(warnings.join(' '));
+  };
+
+  const executeImport = () => {
+    if (parsedData.length === 0) return;
+    if (phoneIssues.length > 0 && !phoneAck) {
+      setError('يجب الاطلاع على تقرير الأرقام غير الصالحة وتأكيد ذلك قبل الحفظ.');
+      return;
+    }
+    onImportComplete(parsedData);
+    setParsedData([]);
+    setSuccessCount(null);
+    setError(null);
+    setPhoneIssues([]);
+    setPhoneAck(false);
+    setMappingDraft(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const clearCurrentDraft = () => {
     setParsedData([]);
     setSuccessCount(null);
     setError(null);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
+    setPhoneIssues([]);
+    setPhoneAck(false);
+    setMappingDraft(null);
+    setMissingIdCount(0);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   // ----------------- MATCHING MODE LOGIC -----------------
@@ -651,6 +679,17 @@ export default function ExcelImporter({
               </div>
             )}
 
+            {mappingDraft && (
+              <ColumnMappingReview
+                headers={mappingDraft.headers}
+                autoMap={mappingDraft.autoMap}
+                overrides={mappingDraft.overrides}
+                onChange={overrides => setMappingDraft({ ...mappingDraft, overrides })}
+                onConfirm={applyConfirmedMapping}
+                onCancel={clearCurrentDraft}
+              />
+            )}
+
             {successCount !== null && parsedData.length > 0 && (
               <div className="mt-4 bg-emerald-50/40 border border-emerald-150 p-4 rounded-xl" id="reg-success">
                 <div className="flex items-center gap-2 text-emerald-850 font-bold text-sm">
@@ -665,8 +704,8 @@ export default function ExcelImporter({
                         <th className="p-2 py-1.5 text-right font-semibold">رقم الطالب</th>
                         <th className="p-2 py-1.5 text-right font-semibold">اسم الطالب</th>
                         <th className="p-2 py-1.5 text-right font-semibold">الصف / الشعبة</th>
-                        <th className="p-2 py-1.5 text-right font-semibold">المحمول المالي</th>
-                        <th className="p-2 py-1.5 text-right font-semibold">مودل</th>
+                        <th className="p-2 py-1.5 text-right font-semibold">الجوال</th>
+                        <th className="p-2 py-1.5 text-right font-semibold">الهوية</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -675,11 +714,8 @@ export default function ExcelImporter({
                           <td className="p-2 text-slate-500 font-mono text-[11px]">{st.id}</td>
                           <td className="p-2 font-bold text-slate-800">{st.name}</td>
                           <td className="p-2 text-slate-600">{st.grade} - {st.section}</td>
-                          <td className="p-2 text-slate-500 font-mono text-[11px]">{st.phone}</td>
-                          <td className="p-2 text-[11px]">
-                            <span className="font-mono" dir="ltr">{st.moodleUsername || '—'}</span>
-                            {st.moodlePassword ? <> / <SecretText value={st.moodlePassword} /></> : null}
-                          </td>
+                          <td className="p-2 text-slate-500 font-mono text-[11px]">{st.phone || '—'}</td>
+                          <td className="p-2 text-[11px] font-mono">{st.id}</td>
                         </tr>
                       ))}
                       {parsedData.length > 5 && (
@@ -693,6 +729,30 @@ export default function ExcelImporter({
                   </table>
                 </div>
 
+                {phoneIssues.length > 0 && (
+                  <div className="mt-3 border border-amber-200 bg-amber-50/60 rounded-lg p-3" id="import-invalid-phones">
+                    <div className="text-xs font-bold text-amber-900 mb-2">تقرير الأرقام غير الصالحة ({phoneIssues.length})</div>
+                    <div className="max-h-[140px] overflow-y-auto bg-white border border-amber-100 rounded-md">
+                      <table className="w-full text-right text-[11px]">
+                        <thead className="bg-slate-50"><tr><th className="p-1.5">صف الملف</th><th className="p-1.5">الطالب</th><th className="p-1.5">المشكلة</th></tr></thead>
+                        <tbody>
+                          {phoneIssues.map((issue, i) => (
+                            <tr key={i} className="border-t border-slate-100">
+                              <td className="p-1.5 font-mono">{issue.rowNumber}</td>
+                              <td className="p-1.5">{issue.identity}</td>
+                              <td className="p-1.5">{PHONE_PROBLEM_LABELS[issue.problem]}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <label className="mt-2 flex items-center gap-2 text-xs font-bold text-amber-900 cursor-pointer">
+                      <input id="ack-invalid-phones" type="checkbox" checked={phoneAck} onChange={e => setPhoneAck(e.target.checked)} />
+                      اطلعت على الأرقام غير الصالحة وأريد استيراد الصفوف (ستُستبعد من الإرسال حتى التصحيح)
+                    </label>
+                  </div>
+                )}
+
                 <div className="flex items-center justify-end gap-3 mt-4 border-t border-slate-100 pt-3">
                   <button
                     onClick={clearCurrentDraft}
@@ -703,7 +763,8 @@ export default function ExcelImporter({
                   </button>
                   <button
                     onClick={executeImport}
-                    className="flex items-center gap-1.5 px-5 font-black py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs shadow-xs transition duration-150"
+                    disabled={phoneIssues.length > 0 && !phoneAck}
+                    className="flex items-center gap-1.5 px-5 font-black py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl text-xs shadow-xs transition duration-150"
                   >
                     <CheckCircle2 className="w-3.5 h-3.5" />
                     تحديث وحفظ الطلاب بسجل المدرسة 💾

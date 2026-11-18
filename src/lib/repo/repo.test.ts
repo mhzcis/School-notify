@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { InMemorySchoolRepository } from './memoryRepo';
 import { SupabaseSchoolRepository } from './supabaseRepo';
-import { chunk, dedupeStudents, isUuid, logToRow, prepareLogs, rowToLog, rowToStudent, studentToRow } from './mapping';
+import { chunk, dedupeStudents, isUuid, logToRow, mergeIncomingStudent, prepareLogs, rowToLog, rowToStudent, studentToRow } from './mapping';
 import { RepoError, UPSERT_CHUNK_SIZE, repoErrorMessage } from './types';
 import { fakeStudent, fakeStudents } from '../../test/fixtures';
 import { MessageLog } from '../../types';
@@ -39,13 +39,35 @@ describe('mapping', () => {
     expect(out.find(s => s.id === '1000000001')!.name).toBe('جديد');
   });
 
-  it('student row round-trip keeps the full name and extra fields', () => {
-    const s = fakeStudent(7, { nameEn: 'Test Student', phone2: '0590000002', moodlePassword: 'fake-pw' });
+  it('student row round-trip keeps the full name and extra fields, and strips notes/passwords', () => {
+    const s = fakeStudent(7, { nameEn: 'Test Student', phone2: '0590000002', previousYearGPA: '90', moodlePassword: 'fake-pw', notes: 'secret' });
     const row = studentToRow(s, OWNER);
     expect(row.national_id).toBe('1000000007');
     expect(row.class_name).toBe('العاشر');
     expect(row.owner).toBe(OWNER);
-    expect(rowToStudent({ ...row, id: 'uuid' } as any)).toMatchObject(s);
+    expect(row.extra).toMatchObject({ nameEn: 'Test Student', phone2: '0590000002', previousYearGPA: '90' });
+    expect(row.extra).not.toHaveProperty('moodlePassword');
+    expect(row.extra).not.toHaveProperty('notes');
+    const back = rowToStudent({ ...row, id: 'uuid' } as any);
+    expect(back).toMatchObject({ id: '1000000007', name: s.name, nameEn: 'Test Student', phone2: '0590000002', previousYearGPA: '90' });
+    expect(back.moodlePassword).toBeUndefined();
+    expect(back.notes).toBeUndefined();
+  });
+
+  it('mergeIncomingStudent keeps omitted extra fields and never writes notes or passwords', () => {
+    const existing = fakeStudent(1, { phone2: '0590000091', previousYearGPA: '88', section: 'ب', notes: 'old' });
+    const incoming = fakeStudent(1, { name: 'طالب تجريبي معدل', phone: '0590000011' });
+    delete (incoming as any).phone2;
+    delete (incoming as any).previousYearGPA;
+    delete (incoming as any).section;
+    const merged = mergeIncomingStudent(existing, { ...incoming, notes: 'new-notes', moodlePassword: 'pw' });
+    expect(merged.phone2).toBe('0590000091');
+    expect(merged.previousYearGPA).toBe('88');
+    expect(merged.section).toBe('ب');
+    expect(merged.name).toBe('طالب تجريبي معدل');
+    expect(merged.phone).toBe('0590000011');
+    expect(merged.notes).toBe('old'); // existing kept; incoming notes ignored
+    expect(merged.moodlePassword).toBeUndefined();
   });
 
   it('message row round-trip', () => {
@@ -87,6 +109,29 @@ describe('InMemorySchoolRepository', () => {
     expect(all.find(s => s.id === '1000000001')!.name).toBe('طالب تجريبي معدل');
   });
 
+  it('merges extra on upsert so omitted phone2/GPA survive, and strips notes/passwords', async () => {
+    const repo = new InMemorySchoolRepository({
+      students: [fakeStudent(1, { phone2: '0590000091', previousYearGPA: '91', notes: 'x' })],
+    });
+    const incoming = fakeStudent(1, { name: 'طالب تجريبي معدل', phone: '0590000011' });
+    delete (incoming as any).phone2;
+    await repo.upsertStudents([incoming]);
+    const s = (await repo.loadAll()).students.find(x => x.id === '1000000001')!;
+    expect(s.name).toBe('طالب تجريبي معدل');
+    expect(s.phone).toBe('0590000011');
+    expect(s.phone2).toBe('0590000091');
+    expect(s.previousYearGPA).toBe('91');
+    expect(s.notes).toBe('x');
+  });
+
+  it('insertStudent adds one row and refuses a duplicate id', async () => {
+    const repo = new InMemorySchoolRepository({ students: fakeStudents(2) });
+    await repo.insertStudent(fakeStudent(99, { name: 'طالب تجريبي جديد' }));
+    expect((await repo.loadAll()).students).toHaveLength(3);
+    await expect(repo.insertStudent(fakeStudent(1))).rejects.toMatchObject({ kind: 'other', message: 'duplicate' });
+    expect((await repo.loadAll()).students).toHaveLength(3);
+  });
+
   it('deletes, logs with hidden immediate campaign, clearLogs, failNext', async () => {
     const repo = new InMemorySchoolRepository({ students: fakeStudents(3) });
     await repo.deleteStudents(['1000000002']);
@@ -107,16 +152,32 @@ describe('InMemorySchoolRepository', () => {
 });
 
 /** Minimal fake of the supabase-js query builder recording calls. */
-function fakeSupabase(opts: { error?: any } = {}) {
+function fakeSupabase(opts: { error?: any; selectError?: any; existing?: any[] } = {}) {
   const calls: any[] = [];
   const sb: any = {
     from(table: string) {
       const q: any = {
+        select(cols: string) {
+          calls.push({ table, op: 'select', cols });
+          return q;
+        },
+        eq(col: string, val: string) { calls.push({ table, op: 'eq', col, val }); return q; },
+        in(col: string, vals: string[]) {
+          calls.push({ table, op: 'in', col, vals });
+          const data = (opts.existing ?? []).filter((r: any) => vals.includes(r.national_id));
+          return Promise.resolve({ data, error: opts.selectError ?? null });
+        },
         upsert(rows: any[], o: any) {
           calls.push({ table, op: 'upsert', rows, onConflict: o?.onConflict });
           return {
             select: async () => ({ data: rows.map((r: any, i: number) => ({ id: `uuid-${r.national_id}-${i}`, national_id: r.national_id })), error: opts.error ?? null }),
             then: (res: any) => res({ error: opts.error ?? null }),
+          };
+        },
+        insert(row: any) {
+          calls.push({ table, op: 'insert', row });
+          return {
+            select: async () => ({ data: [{ id: 'uuid-new', national_id: row.national_id }], error: opts.error ?? null }),
           };
         },
       };
@@ -132,9 +193,37 @@ describe('SupabaseSchoolRepository', () => {
     const repo = new SupabaseSchoolRepository(sb, OWNER);
     const n = await repo.upsertStudents([...fakeStudents(1001), fakeStudent(5)]);
     expect(n).toBe(1001);
-    expect(calls.map(c => c.rows.length)).toEqual([500, 500, 1]);
-    expect(calls.every(c => c.table === 'students' && c.onConflict === 'owner,national_id')).toBe(true);
-    expect(calls.flatMap(c => c.rows).every((r: any) => r.owner === OWNER)).toBe(true);
+    const upserts = calls.filter(c => c.op === 'upsert');
+    expect(upserts.map(c => c.rows.length)).toEqual([500, 500, 1]);
+    expect(upserts.every(c => c.table === 'students' && c.onConflict === 'owner,national_id')).toBe(true);
+    expect(calls.flatMap(c => c.rows).filter((r: any) => r && r.owner).every((r: any) => r.owner === OWNER)).toBe(true);
+    expect(calls.some(c => c.op === 'in')).toBe(true);
+  });
+
+  it('merges existing extra (phone2/GPA) on supabase upsert and never writes notes or passwords', async () => {
+    const existing = [{
+      id: 'uuid-1',
+      national_id: '1000000001',
+      name: 'طالب تجريبي 1',
+      parent_name: 'ولي أمر تجريبي',
+      phone: '0590000001',
+      class_name: 'العاشر',
+      extra: { phone2: '0590000091', previousYearGPA: '91', section: 'أ', notes: 'old' },
+    }];
+    const { sb, calls } = fakeSupabase({ existing });
+    const repo = new SupabaseSchoolRepository(sb, OWNER);
+    const incoming = fakeStudent(1, { name: 'طالب تجريبي معدل', phone: '0590000011', notes: 'new', moodlePassword: 'pw' });
+    delete (incoming as any).phone2;
+    await repo.upsertStudents([incoming]);
+    const upserts = calls.filter(c => c.op === 'upsert');
+    expect(upserts).toHaveLength(1);
+    const row = upserts[0].rows[0];
+    expect(row.extra.phone2).toBe('0590000091');
+    expect(row.extra.previousYearGPA).toBe('91');
+    expect(row.name).toBe('طالب تجريبي معدل');
+    expect(row.phone).toBe('0590000011');
+    expect(row.extra.notes).toBe('old');
+    expect(row.extra).not.toHaveProperty('moodlePassword');
   });
 
   it('maps a PostgREST permission error to an auth RepoError', async () => {

@@ -11,12 +11,14 @@ interface SchedulerProps {
   scheduledMessages: ScheduledMessage[];
   onCancelSchedule: (id: string) => void;
   onDispatchImmediately: (id: string) => void;
+  onToggleCampaignFlag?: (id: string, flags: { isTest?: boolean; archived?: boolean }) => void;
 }
 
 export default function Scheduler({
   scheduledMessages,
   onCancelSchedule,
-  onDispatchImmediately
+  onDispatchImmediately,
+  onToggleCampaignFlag,
 }: SchedulerProps) {
 
   const getStatusBadge = (status: ScheduledMessage['status']) => {
@@ -98,6 +100,12 @@ export default function Scheduler({
                     {item.targetType === 'section' && `الصف ${item.targetGrade} / الشعبة ${item.targetSection}`}
                     {item.targetType === 'custom' && 'طلاب مخصصين'}
                   </span>
+                  {item.isTest && (
+                    <span className="bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-md text-[10px] font-bold">تجريبي</span>
+                  )}
+                  {item.archived && (
+                    <span className="bg-slate-100 text-slate-500 border border-slate-200 px-2 py-0.5 rounded-md text-[10px] font-bold">مخفي</span>
+                  )}
 
                   <span className="text-[11px] text-slate-400 font-mono">
                     الرمز الرقمي: #{item.id}
@@ -149,6 +157,25 @@ export default function Scheduler({
                       <Check className="w-4 h-4" />
                       أُرسلت يدوياً (راجع التقارير للنتيجة الفعلية)
                     </span>
+                  )}
+
+                  {onToggleCampaignFlag && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onToggleCampaignFlag(item.id, { isTest: !item.isTest })}
+                        className="px-2.5 py-1 text-[10px] border border-amber-200 text-amber-700 hover:bg-amber-50 rounded-lg font-bold cursor-pointer"
+                      >
+                        {item.isTest ? 'إلغاء وسم تجريبي' : 'وسم كتجريبي'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onToggleCampaignFlag(item.id, { archived: !item.archived })}
+                        className="px-2.5 py-1 text-[10px] border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-lg font-bold cursor-pointer"
+                      >
+                        {item.archived ? 'إظهار' : 'إخفاء'}
+                      </button>
+                    </>
                   )}
                 </div>
               </div>

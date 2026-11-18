@@ -22,7 +22,7 @@ export interface PhoneCheck {
 /** Known fake/placeholder numbers that older versions inserted when a phone was missing. */
 export const PLACEHOLDER_PHONES = new Set(['0590000000', '0599000000', '0500000000', '0560000000']);
 
-function toAsciiDigits(s: string): string {
+export function toAsciiDigits(s: string): string {
   return s
     .replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660))
     .replace(/[\u06F0-\u06F9]/g, d => String(d.charCodeAt(0) - 0x06f0));
