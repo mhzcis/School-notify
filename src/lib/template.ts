@@ -20,22 +20,34 @@ export const PLACEHOLDERS: PlaceholderDef[] = [
   { tag: '{{الشعبة}}', label: 'الشعبة' },
   { tag: '{{اليوم}}', label: 'تاريخ اليوم' },
   { tag: '{{اسم_المستخدم}}', label: 'اسم مستخدم مودل' },
+  { tag: '{{اسم_مستخدم_مودل}}', label: 'اسم مستخدم مودل (مرادف)' },
   { tag: '{{كلمة_المرور}}', label: 'كلمة مرور مودل (حساسة)', sensitive: true },
+  { tag: '{{كلمة_مرور_مودل}}', label: 'كلمة مرور مودل (حساسة، مرادف)', sensitive: true },
+  { tag: '{{رابط_الاختبار}}', label: 'رابط فتح الاختبار للشعبة' },
+  { tag: '{{موعد_الإغلاق}}', label: 'موعد إغلاق الاختبار أو الواجب' },
 ];
 
 /** Placeholder keys whose values are secrets (masked in previews, lists and stored logs). */
-export const SECRET_KEYS = ['كلمة_المرور'];
+export const SECRET_KEYS = ['كلمة_المرور', 'كلمة_مرور_مودل'];
 export const SECRET_MASK = '••••••';
 
-/** True when the template references a secret placeholder such as {{كلمة_المرور}}. */
+const SECRET_PLACEHOLDER_RE = /{{\s*(?:كلمة_المرور|كلمة_مرور_مودل)\s*}}/;
+const USERNAME_PLACEHOLDER_RE = /{{\s*اسم_المستخدم\s*}}|{{\s*اسم_مستخدم_مودل\s*}}/;
+
+/** True when the template references a secret placeholder such as {{كلمة_المرور}} or {{كلمة_مرور_مودل}}. */
 export function templateUsesSecrets(template: string): boolean {
-  return /{{\s*كلمة_المرور\s*}}/.test(template || '');
+  return SECRET_PLACEHOLDER_RE.test(template || '');
+}
+
+/** True when the template references a stored Moodle username or password placeholder. */
+export function templateUsesCredentials(template: string): boolean {
+  return templateUsesSecrets(template) || USERNAME_PLACEHOLDER_RE.test(template || '');
 }
 
 /** Moodle placeholders used by the template that the student has no value for. */
 export function missingMoodleFields(template: string, student: Partial<Student>): Array<'moodleUsername' | 'moodlePassword'> {
   const out: Array<'moodleUsername' | 'moodlePassword'> = [];
-  if (/{{\s*اسم_المستخدم\s*}}/.test(template || '') && !clean(student.moodleUsername)) out.push('moodleUsername');
+  if (USERNAME_PLACEHOLDER_RE.test(template || '') && !clean(student.moodleUsername)) out.push('moodleUsername');
   if (templateUsesSecrets(template) && !clean(student.moodlePassword)) out.push('moodlePassword');
   return out;
 }
@@ -48,6 +60,9 @@ export interface RenderOptions {
   today?: Date;
   /** Replace secret values (e.g. the Moodle password) with a mask. Use for anything displayed in lists or stored. */
   maskSecrets?: boolean;
+  /** Per-section quiz/assignment window (never read from student.notes). */
+  quizUrl?: string;
+  closeDate?: string;
 }
 
 export function formatArabicDate(d: Date): string {
@@ -95,7 +110,11 @@ export function renderTemplate(template: string, student: Partial<Student>, opti
     'ملاحظات': clean(student.notes),
     'اليوم': formatArabicDate(options.today ?? new Date()),
     'اسم_المستخدم': clean(student.moodleUsername),
+    'اسم_مستخدم_مودل': clean(student.moodleUsername),
     'كلمة_المرور': options.maskSecrets && clean(student.moodlePassword) ? SECRET_MASK : clean(student.moodlePassword),
+    'كلمة_مرور_مودل': options.maskSecrets && clean(student.moodlePassword) ? SECRET_MASK : clean(student.moodlePassword),
+    'رابط_الاختبار': clean(options.quizUrl),
+    'موعد_الإغلاق': clean(options.closeDate),
   };
   return template.replace(/{{\s*([^{}]+?)\s*}}/g, (match, key: string) =>
     Object.prototype.hasOwnProperty.call(values, key) ? values[key] : match

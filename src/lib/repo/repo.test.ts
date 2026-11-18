@@ -334,3 +334,59 @@ describe('recipient groups in the repository', () => {
     localStorage.removeItem(LOCAL_GROUPS_KEY);
   });
 });
+
+describe('Moodle credentials and section events (memory repo)', () => {
+  it('stores credentials separately from students and never puts them on the student row', async () => {
+    const repo = new InMemorySchoolRepository({ students: [fakeStudent(1)] });
+    await repo.upsertMoodleCredentials([
+      { nationalId: '1000000001', moodleUsername: 'fake.user01', moodlePassword: 'Fake#Pass-0001' },
+    ]);
+    const data = await repo.loadAll();
+    expect(data.students[0].moodlePassword).toBeUndefined();
+    expect(data.students[0].moodleUsername).toBeUndefined();
+    const listed = await repo.listMoodleCredentials();
+    expect(listed.available).toBe(true);
+    expect(listed.rows[0].moodleUsername).toBe('fake.user01');
+  });
+
+  it('reports the store as unavailable and refuses to write when the table is not applied', async () => {
+    const repo = new InMemorySchoolRepository();
+    repo.credentialsAvailable = false;
+    const listed = await repo.listMoodleCredentials();
+    expect(listed).toEqual({ available: false, rows: [] });
+    await expect(repo.upsertMoodleCredentials([
+      { nationalId: '1000000001', moodleUsername: 'x', moodlePassword: 'y' },
+    ])).rejects.toMatchObject({ message: 'credentials_unavailable' });
+  });
+
+  it('round-trips section events without touching students', async () => {
+    const repo = new InMemorySchoolRepository({ students: [fakeStudent(1)] });
+    await repo.upsertSectionEvents([{
+      id: '44444444-4444-4444-8444-444444444444',
+      grade: 'رابع', section: 'أ', type: 'quiz', title: 'اختبار تجريبي',
+      closeAt: '', closeLabel: 'الخميس', url: 'https://mhzcis.github.io/moodle-quiz-launcher/?id=111111',
+      duration: '30 دقيقة', attempts: 'محاولة واحدة', updatedAt: '2026-11-18T10:00:00.000Z',
+    }]);
+    const data = await repo.loadAll();
+    expect(data.sectionEvents).toHaveLength(1);
+    expect(data.sectionEvents![0].title).toBe('اختبار تجريبي');
+    expect(data.students).toHaveLength(1);
+  });
+});
+
+describe('rowToStudent strips leftover credential keys from extra', () => {
+  it('does not expose moodlePassword on the Student object', () => {
+    const s = rowToStudent({
+      national_id: '1000000001',
+      name: 'طالب تجريبي 1',
+      parent_name: 'ولي أمر تجريبي',
+      phone: '0590000001',
+      class_name: 'عاشر',
+      extra: { section: 'أ', moodlePassword: 'Fake#Pass-0001', moodleUsername: 'fake.user01', notes: 'لا' },
+    });
+    expect(s.section).toBe('أ');
+    expect(s.moodlePassword).toBeUndefined();
+    expect(s.moodleUsername).toBeUndefined();
+    expect(s.notes).toBeUndefined();
+  });
+});

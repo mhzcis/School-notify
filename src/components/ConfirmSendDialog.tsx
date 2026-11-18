@@ -35,8 +35,15 @@ export interface ConfirmSendDialogProps {
   quietHoursLabel?: string;
   /** Count of same-phone + same-body sends in the last 24 hours (warn, do not block). */
   duplicateCount?: number;
-  onConfirm: () => void;
+  /** When true, the teacher must tick an extra box because the template includes Moodle credentials. */
+  requiresCredentialsConfirm?: boolean;
+  onConfirm: (decision?: ConfirmDecision) => void;
   onCancel: () => void;
+}
+
+export interface ConfirmDecision {
+  quietHoursOverride: boolean;
+  credentialsConfirmed: boolean;
 }
 
 /**
@@ -48,6 +55,7 @@ export default function ConfirmSendDialog(props: ConfirmSendDialogProps) {
     open, mode, studentCount, contents, excludedCount, sampleText, sampleMaskedText,
     missingMoodleCount = 0, sampleRecipientLabel, samples, scheduledLabel,
     quietHoursActive = false, quietHoursLabel = QUIET_HOURS_LABEL, duplicateCount = 0,
+    requiresCredentialsConfirm = false,
     onConfirm, onCancel,
   } = props;
   const [price, setPrice] = useState<string>(() => {
@@ -55,6 +63,7 @@ export default function ConfirmSendDialog(props: ConfirmSendDialogProps) {
   });
   const [typedCount, setTypedCount] = useState('');
   const [quietOverride, setQuietOverride] = useState(false);
+  const [credentialsOverride, setCredentialsOverride] = useState(false);
   const [locked, setLocked] = useState(false);
   const lockedRef = useRef(false);
 
@@ -66,6 +75,7 @@ export default function ConfirmSendDialog(props: ConfirmSendDialogProps) {
     if (!open) return;
     setTypedCount('');
     setQuietOverride(false);
+    setCredentialsOverride(false);
     setLocked(false);
     lockedRef.current = false;
   }, [open, studentCount, contents.length]);
@@ -79,13 +89,14 @@ export default function ConfirmSendDialog(props: ConfirmSendDialogProps) {
   const needsTyped = requiresTypedCount(estimate.messages);
   const typedOk = !needsTyped || typedCountMatches(typedCount, estimate.messages);
   const quietOk = !quietHoursActive || quietOverride;
-  const canConfirm = estimate.messages > 0 && typedOk && quietOk && !locked;
+  const credentialsOk = !requiresCredentialsConfirm || credentialsOverride;
+  const canConfirm = estimate.messages > 0 && typedOk && quietOk && credentialsOk && !locked;
 
   const handleConfirm = () => {
     if (!canConfirm || lockedRef.current) return;
     lockedRef.current = true;
     setLocked(true);
-    onConfirm();
+    onConfirm({ quietHoursOverride: quietOverride, credentialsConfirmed: credentialsOverride });
   };
 
   if (!open) return null;
@@ -169,6 +180,24 @@ export default function ConfirmSendDialog(props: ConfirmSendDialogProps) {
                 onChange={e => setQuietOverride(e.target.checked)}
               />
               أؤكد أنني أريد الإرسال خلال ساعات الهدوء
+            </label>
+          </div>
+        )}
+
+        {requiresCredentialsConfirm && (
+          <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs space-y-2" id="confirm-credentials-box">
+            <div className="flex gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>هذه الرسالة تتضمن بيانات دخول مودل (اسم مستخدم أو كلمة مرور). تظهر كلمة المرور في المعاينة مخفية، وتُرسل فقط بعد هذا التأكيد الإضافي. لن تُحفظ في التقارير بنصها الصريح.</span>
+            </div>
+            <label className="flex items-center gap-2 font-bold cursor-pointer">
+              <input
+                id="confirm-credentials-override"
+                type="checkbox"
+                checked={credentialsOverride}
+                onChange={e => setCredentialsOverride(e.target.checked)}
+              />
+              أؤكد أنني أريد إرسال بيانات دخول مودل لهذه المجموعة فقط
             </label>
           </div>
         )}

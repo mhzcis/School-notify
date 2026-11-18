@@ -11,11 +11,11 @@ import {
   StudentRow,
   TemplateRow,
   campaignFlagsFromRow,
+  forbiddenExtraFromRow,
   campaignToRow,
   chunk,
   dedupeStudents,
   logToRow,
-  FORBIDDEN_STUDENT_KEYS,
   mergeIncomingStudent,
   prepareLogs,
   rowToCampaign,
@@ -36,6 +36,13 @@ import {
   writeLocalGroups,
   type RecipientGroup,
 } from '../recipientGroups';
+import type { MoodleCredential } from '../moodleCredentials';
+import {
+  parseSectionEvents,
+  readLocalSectionEvents,
+  writeLocalSectionEvents,
+  type SectionEvent,
+} from '../sectionEvents';
 
 const PAGE = 1000;
 
@@ -121,6 +128,12 @@ export class SupabaseSchoolRepository implements SchoolRepository {
       } catch {
         groups = readLocalGroups();
       }
+      let sectionEvents: SectionEvent[] = [];
+      try {
+        sectionEvents = await this.listSectionEvents();
+      } catch {
+        sectionEvents = readLocalSectionEvents();
+      }
       return {
         students: students.map(rowToStudent),
         templates: templates.map(rowToTemplate),
@@ -128,6 +141,7 @@ export class SupabaseSchoolRepository implements SchoolRepository {
         logs: messages.map(rowToLog).sort((a, b) => (a.sentTime < b.sentTime ? 1 : a.sentTime > b.sentTime ? -1 : 0)),
         campaignFlags: campaigns.map(campaignFlagsFromRow),
         groups,
+        sectionEvents,
       };
     } catch (err) {
       throw toRepoError(err);
@@ -139,6 +153,7 @@ export class SupabaseSchoolRepository implements SchoolRepository {
     let done = 0;
     try {
       const existingById = new Map<string, Student>();
+      const existingForbidden = new Map<string, Record<string, unknown>>();
       for (const idBatch of chunk(unique.map(s => s.id), 200)) {
         const { data, error } = await this.sb
           .from('students')
@@ -148,6 +163,7 @@ export class SupabaseSchoolRepository implements SchoolRepository {
         if (error) throw toRepoError(error);
         for (const r of (data ?? []) as StudentRow[]) {
           existingById.set(r.national_id, rowToStudent(r));
+          existingForbidden.set(r.national_id, forbiddenExtraFromRow(r));
           if (r.id) this.studentUuidByNationalId.set(r.national_id, r.id);
         }
       }
@@ -155,13 +171,11 @@ export class SupabaseSchoolRepository implements SchoolRepository {
       for (const batch of chunk(merged, UPSERT_CHUNK_SIZE)) {
         const rows = batch.map(s => {
           const row = studentToRow(s, this.owner);
-          const existing = existingById.get(s.id);
-          if (existing) {
-            // studentToRow strips notes/credentials; copy any already-stored keys back so a partial upsert does not wipe them.
-            for (const k of FORBIDDEN_STUDENT_KEYS) {
-              const v = (existing as any)[k];
-              if (v !== undefined) row.extra[k] = v;
-            }
+          const preserved = existingForbidden.get(s.id);
+          if (preserved) {
+            // Leftover keys stay in extra so a partial upsert does not wipe historical values;
+            // they are never exposed on Student and never accepted from an incoming import.
+            Object.assign(row.extra, preserved);
           }
           return row;
         });
@@ -426,6 +440,226 @@ export class SupabaseSchoolRepository implements SchoolRepository {
       if (isMissingRelationError(err)) {
         this.markGroupsLocal();
         deleteLocalGroup(id);
+        return;
+      }
+      throw toRepoError(err);
+    }
+  }
+
+  // ----- Moodle credentials (no localStorage fallback) -----
+  private credentialsMode: 'unknown' | 'cloud' | 'unavailable' = 'unknown';
+
+  private credToRow(c: MoodleCredential) {
+    return {
+      owner: this.owner,
+      national_id: c.nationalId,
+      moodle_username: c.moodleUsername ?? '',
+      moodle_password: c.moodlePassword ?? '',
+      updated_at: new Date().toISOString(),
+    };
+  }
+
+  private rowToCred(r: { national_id: string; moodle_username?: string; moodle_password?: string }): MoodleCredential {
+    return {
+      nationalId: String(r.national_id),
+      moodleUsername: String(r.moodle_username ?? ''),
+      moodlePassword: String(r.moodle_password ?? ''),
+    };
+  }
+
+  async listMoodleCredentials(): Promise<{ available: boolean; rows: MoodleCredential[] }> {
+    if (this.credentialsMode === 'unavailable') return { available: false, rows: [] };
+    try {
+      const { data, error } = await this.sb
+        .from('student_moodle_credentials')
+        .select('national_id,moodle_username,moodle_password')
+        .order('national_id', { ascending: true });
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.credentialsMode = 'unavailable';
+          return { available: false, rows: [] };
+        }
+        throw toRepoError(error);
+      }
+      this.credentialsMode = 'cloud';
+      return { available: true, rows: (data ?? []).map(r => this.rowToCred(r as any)) };
+    } catch (err) {
+      if (isMissingRelationError(err)) {
+        this.credentialsMode = 'unavailable';
+        return { available: false, rows: [] };
+      }
+      throw toRepoError(err);
+    }
+  }
+
+  async upsertMoodleCredentials(rows: MoodleCredential[]): Promise<number> {
+    const unique = new Map<string, MoodleCredential>();
+    for (const r of rows) {
+      const id = String(r.nationalId ?? '').trim();
+      if (id.length < 4) continue;
+      unique.set(id, { ...r, nationalId: id });
+    }
+    const list = [...unique.values()];
+    if (!list.length) return 0;
+    if (this.credentialsMode === 'unavailable') throw new RepoError('other', 'credentials_unavailable');
+    try {
+      const { error } = await this.sb
+        .from('student_moodle_credentials')
+        .upsert(list.map(c => this.credToRow(c)), { onConflict: 'owner,national_id' });
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.credentialsMode = 'unavailable';
+          throw new RepoError('other', 'credentials_unavailable');
+        }
+        throw toRepoError(error);
+      }
+      this.credentialsMode = 'cloud';
+      return list.length;
+    } catch (err) {
+      if (err instanceof RepoError) throw err;
+      if (isMissingRelationError(err)) {
+        this.credentialsMode = 'unavailable';
+        throw new RepoError('other', 'credentials_unavailable');
+      }
+      throw toRepoError(err);
+    }
+  }
+
+  async deleteMoodleCredential(nationalId: string): Promise<void> {
+    const id = String(nationalId ?? '').trim();
+    if (!id) return;
+    if (this.credentialsMode === 'unavailable') throw new RepoError('other', 'credentials_unavailable');
+    try {
+      const { error } = await this.sb.from('student_moodle_credentials').delete().eq('national_id', id);
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.credentialsMode = 'unavailable';
+          throw new RepoError('other', 'credentials_unavailable');
+        }
+        throw toRepoError(error);
+      }
+    } catch (err) {
+      if (err instanceof RepoError) throw err;
+      if (isMissingRelationError(err)) {
+        this.credentialsMode = 'unavailable';
+        throw new RepoError('other', 'credentials_unavailable');
+      }
+      throw toRepoError(err);
+    }
+  }
+
+  // ----- Section events (localStorage fallback) -----
+  private eventsMode: 'unknown' | 'cloud' | 'local' = 'unknown';
+
+  private eventToRow(e: SectionEvent) {
+    return {
+      id: e.id,
+      owner: this.owner,
+      grade: e.grade,
+      section: e.section,
+      event_type: e.type,
+      title: e.title,
+      close_at: e.closeAt || null,
+      close_label: e.closeLabel,
+      url: e.url,
+      duration: e.duration,
+      attempts: e.attempts,
+      updated_at: e.updatedAt || new Date().toISOString(),
+    };
+  }
+
+  private rowToEvent(r: any): SectionEvent {
+    return parseSectionEvents([{
+      id: r.id,
+      grade: r.grade,
+      section: r.section,
+      type: r.event_type,
+      title: r.title,
+      closeAt: r.close_at || '',
+      closeLabel: r.close_label || '',
+      url: r.url || '',
+      duration: r.duration || '',
+      attempts: r.attempts || '',
+      updatedAt: r.updated_at || r.created_at || '',
+    }])[0];
+  }
+
+  async listSectionEvents(): Promise<SectionEvent[]> {
+    if (this.eventsMode === 'local') return readLocalSectionEvents();
+    try {
+      const { data, error } = await this.sb
+        .from('section_events')
+        .select('id,grade,section,event_type,title,close_at,close_label,url,duration,attempts,created_at,updated_at')
+        .order('created_at', { ascending: true });
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.eventsMode = 'local';
+          return readLocalSectionEvents();
+        }
+        throw toRepoError(error);
+      }
+      this.eventsMode = 'cloud';
+      return parseSectionEvents((data ?? []).map(r => this.rowToEvent(r)).filter(Boolean));
+    } catch (err) {
+      if (isMissingRelationError(err)) {
+        this.eventsMode = 'local';
+        return readLocalSectionEvents();
+      }
+      throw toRepoError(err);
+    }
+  }
+
+  async upsertSectionEvents(events: SectionEvent[]): Promise<void> {
+    const list = parseSectionEvents(events);
+    if (!list.length) return;
+    if (this.eventsMode === 'local') {
+      const current = readLocalSectionEvents();
+      const map = new Map(current.map(e => [e.id, e]));
+      for (const e of list) map.set(e.id, e);
+      writeLocalSectionEvents([...map.values()]);
+      return;
+    }
+    try {
+      const { error } = await this.sb.from('section_events').upsert(list.map(e => this.eventToRow(e)), { onConflict: 'id' });
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.eventsMode = 'local';
+          await this.upsertSectionEvents(list);
+          return;
+        }
+        throw toRepoError(error);
+      }
+      this.eventsMode = 'cloud';
+    } catch (err) {
+      if (isMissingRelationError(err)) {
+        this.eventsMode = 'local';
+        await this.upsertSectionEvents(list);
+        return;
+      }
+      throw toRepoError(err);
+    }
+  }
+
+  async deleteSectionEvent(id: string): Promise<void> {
+    if (this.eventsMode === 'local') {
+      writeLocalSectionEvents(readLocalSectionEvents().filter(e => e.id !== id));
+      return;
+    }
+    try {
+      const { error } = await this.sb.from('section_events').delete().eq('id', id);
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.eventsMode = 'local';
+          writeLocalSectionEvents(readLocalSectionEvents().filter(e => e.id !== id));
+          return;
+        }
+        throw toRepoError(error);
+      }
+      this.eventsMode = 'cloud';
+    } catch (err) {
+      if (isMissingRelationError(err)) {
+        this.eventsMode = 'local';
+        writeLocalSectionEvents(readLocalSectionEvents().filter(e => e.id !== id));
         return;
       }
       throw toRepoError(err);

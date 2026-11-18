@@ -15,6 +15,7 @@ import { AppData, SchoolRepository } from './repo/types';
 import { FORBIDDEN_STUDENT_KEYS, isUuid, newId, stripForbiddenStudentFields } from './repo/mapping';
 import { applyBackupPrefs, collectBackupPrefs, markBackupDownloaded, type BackupPrefs } from './smsPrefs';
 import { parseGroups } from './recipientGroups';
+import { parseSectionEvents } from './sectionEvents';
 import { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../types';
 
 export const BACKUP_FORMAT = 'school-notify-cloud-backup';
@@ -37,6 +38,7 @@ export interface BackupSummary {
   campaigns: number;
   logs: number;
   groups: number;
+  sectionEvents: number;
   hasPrefs: boolean;
   secretsIncluded: boolean;
   exportedAt: string;
@@ -81,6 +83,7 @@ export function createBackup(data: AppData, opts: { now?: Date; prefs?: BackupPr
       campaigns: data.campaigns,
       logs: data.logs,
       groups: parseGroups(data.groups ?? []),
+      sectionEvents: parseSectionEvents(data.sectionEvents ?? []),
     },
   };
 }
@@ -112,6 +115,8 @@ export function validateBackup(text: string): ValidationResult {
     if (!Array.isArray(d[k])) errors.push(`الحقل "${k}" مفقود أو ليس قائمة.`);
   }
   if (d.groups !== undefined && !Array.isArray(d.groups)) errors.push('الحقل "groups" ليس قائمة.');
+  if (d.sectionEvents !== undefined && !Array.isArray(d.sectionEvents)) errors.push('الحقل "sectionEvents" ليس قائمة.');
+  if (d.credentials !== undefined || d.moodleCredentials !== undefined) errors.push('ملف النسخة يحتوي بيانات دخول مودل وهذا غير مسموح.');
   if (parsed.prefs !== undefined && !isObj(parsed.prefs)) errors.push('حقل الإعدادات غير صالح.');
   if (errors.length) return { ok: false, errors };
   const badStudents = (d.students as unknown[]).filter(s => !isObj(s) || !String((s as any).id ?? '').trim() || typeof (s as any).name !== 'string');
@@ -137,6 +142,7 @@ export function validateBackup(text: string): ValidationResult {
       campaigns: d.campaigns as ScheduledMessage[],
       logs: d.logs as MessageLog[],
       groups,
+      sectionEvents: parseSectionEvents(d.sectionEvents ?? []),
     },
   };
   return {
@@ -148,6 +154,7 @@ export function validateBackup(text: string): ValidationResult {
       campaigns: d.campaigns.length,
       logs: d.logs.length,
       groups: groups.length,
+      sectionEvents: backup.data.sectionEvents?.length ?? 0,
       hasPrefs: !!backup.prefs,
       secretsIncluded: false,
       exportedAt: backup.exportedAt,
@@ -192,6 +199,11 @@ export async function applyBackup(
     onProgress?.('groups');
     await repo.upsertRecipientGroups(groups);
   }
+  const sectionEvents = parseSectionEvents(d.sectionEvents ?? []);
+  if (sectionEvents.length) {
+    onProgress?.('sectionEvents');
+    await repo.upsertSectionEvents(sectionEvents);
+  }
   if (backup.prefs) applyBackupPrefs(backup.prefs);
 }
 
@@ -235,5 +247,5 @@ export function downloadDataBackup(data: AppData, opts: { label?: string; prefs?
 
 /** True if a JSON string appears to contain Moodle credentials or SMSGate secrets. */
 export function backupTextLooksSensitive(text: string): boolean {
-  return /moodlePassword"\s*:\s*"[^"]+"|SMSGATE_|smsgate password|webhook.signing|encryption.passphrase/i.test(text);
+  return /moodlePassword"\s*:\s*"[^"]+"|moodle_password"\s*:\s*"[^"]+"|كلمة_مرور_مودل|SMSGATE_|smsgate password|webhook.signing|encryption.passphrase/i.test(text);
 }

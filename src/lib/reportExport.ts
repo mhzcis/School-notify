@@ -29,7 +29,7 @@ export function campaignTitleForLog(log: MessageLog, titles: Record<string, stri
 function maskBody(body: string): string {
   const text = body ?? '';
   // Stored logs should already be masked; keep any obvious leftover password placeholders covered.
-  return text.replace(/{{\s*كلمة_المرور\s*}}/g, SECRET_MASK);
+  return text.replace(/{{\s*كلمة_المرور(?:_مودل)?\s*}}/g, SECRET_MASK);
 }
 
 export interface ReportExportRow {

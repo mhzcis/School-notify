@@ -30,11 +30,13 @@ export interface ExcludedRecipient {
   problem: PhoneProblem;
 }
 
+export type DispatchRender = (tpl: string, student: Student, options?: { maskSecrets?: boolean }) => string;
+
 export function buildDispatchItems(
   students: Student[],
   phoneTarget: PhoneTarget,
   template: string,
-  render: (tpl: string, s: Student) => string = (tpl, s) => renderTemplate(tpl, s)
+  render: DispatchRender = (tpl, s, opts) => renderTemplate(tpl, s, opts)
 ): { items: DispatchItem[]; excluded: ExcludedRecipient[] } {
   const items: DispatchItem[] = [];
   const excluded: ExcludedRecipient[] = [];
@@ -59,7 +61,7 @@ export function buildDispatchItems(
       seen.add(check.local);
       if (content === null) {
         content = render(template, s);
-        logContent = templateUsesSecrets(template) ? renderTemplate(template, s, { maskSecrets: true }) : content;
+        logContent = templateUsesSecrets(template) ? render(template, s, { maskSecrets: true }) : content;
       }
       items.push({
         studentId: s.id,

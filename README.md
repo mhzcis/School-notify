@@ -62,6 +62,36 @@ Named recipient groups can be saved from the send screen; they sync to
 `school_notify.recipient_groups` once that pending migration is applied, and otherwise stay in
 `localStorage` + the backup file.
 
+## Moodle tools
+
+The **أدوات مودل** tab imports Moodle CSV/Excel exports (participants / last access,
+assignment grading worksheets, and quiz reports). Rows are matched by national ID first
+(then Moodle user id, then a unique exact name). The teacher can build a campaign or a
+saved group for “never logged in”, “not since X days”, “not submitted”, “draft”, or
+“not attempted”. Grades stay in the import session only and are never written to the
+student row.
+
+Per-section quiz windows (title, close time, duration, attempts, and a launcher URL of
+the form `https://mhzcis.github.io/moodle-quiz-launcher/?id=<quizId>`) feed the
+`{{رابط_الاختبار}}` and `{{موعد_الإغلاق}}` placeholders and a one-click WhatsApp blurb
+(one section at a time — links are never mixed). Section windows sync to
+`school_notify.section_events` once that pending migration is applied; otherwise they
+stay in `localStorage` and the normal backup file.
+
+Moodle usernames and passwords are stored only in the owner-only table
+`school_notify.student_moodle_credentials` (RLS forced, `owner = auth.uid()` and
+`is_allowed()`, no anon access). They are imported through a dedicated “Moodle
+credentials” form, never through the regular student importer, and they are excluded
+from backups, student Excel exports, and reports. Sending a template that uses
+`{{كلمة_مرور_مودل}}` / `{{كلمة_المرور}}` (or the username aliases) requires an extra
+confirmation. If the pending migration has not been applied, the import is disabled and
+credentials are not written to the browser.
+
+Encryption of the password column is intentionally RLS-only: a pgcrypto key would still
+be revealed to the signed-in owner in the browser (or to anyone with the service-role
+key), so it would not be a simpler or more robust control than the existing owner-only
+RLS. See `supabase/pending-migrations/20261118_student_moodle_credentials.sql`.
+
 ## SMS sending
 
 Automatic sending goes through the Edge Function `school-notify-sms`
