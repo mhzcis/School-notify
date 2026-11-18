@@ -38,7 +38,7 @@ export interface Student {
   previousYearGPA?: string; // معدل الطالب العام السابق
   notes?: string; // ملاحظات ومستحقات مخصصة
   moodleUsername?: string; // اسم مستخدم مودل الافتراضي
-  /** كلمة مرور مودل الافتراضية — حساسة: تُخفى في القوائم والمعاينات ولا تُحفظ في السجلات. مخزنة في السحابة (school_notify.students.extra) لحساب المالك فقط وتحميها RLS. */
+  /** كلمة مرور مودل — حساسة، تُملأ وقت الإرسال فقط من جدول student_moodle_credentials ولا تُحفظ في students. */
   moodlePassword?: string;
 }
 
@@ -66,6 +66,10 @@ export interface ScheduledMessage {
   isTest?: boolean;
   /** Hidden from default lists; stored in campaigns.meta. Does not delete rows. */
   archived?: boolean;
+  /** Teacher confirmed that a scheduled send may fill Moodle credentials at send time. */
+  allowCredentialsAutosend?: boolean;
+  /** Teacher overrode quiet hours when scheduling this campaign. */
+  quietHoursOverride?: boolean;
 }
 
 export interface MessageLog {

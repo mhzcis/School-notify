@@ -21,11 +21,13 @@ import Scheduler from './components/Scheduler';
 import ReportsPanel from './components/ReportsPanel';
 import SmsGatewaySettings, { GatewayStatus } from './components/SmsGatewaySettings';
 import BackupPanel from './components/BackupPanel';
+import MoodleTools from './components/MoodleTools';
 import { RepoError, SchoolRepository, repoErrorMessage } from './lib/repo/types';
 import { newId } from './lib/repo/mapping';
 import { downloadDataBackup } from './lib/backup';
 import { collectBackupPrefs, daysSinceLastBackup, isBackupReminderDue, readPref, UI_PREF_KEYS } from './lib/smsPrefs';
 import { buildRecipientGroup, type RecipientGroup } from './lib/recipientGroups';
+import type { SectionEvent } from './lib/sectionEvents';
 import { fetchStatusesOnce, FINAL_GATEWAY_STATES, GATEWAY_STATE_LABELS } from './lib/smsProxy';
 import type { ProxyInvoker, ProxyResponse, GatewayStatus as SmsGatewayState, GatewayState } from './lib/smsProxy';
 import { invokeSmsFunction } from './lib/supabase';
@@ -49,7 +51,8 @@ import {
   DatabaseBackup,
   LogOut,
   Loader2,
-  RefreshCw
+  RefreshCw,
+  GraduationCap
 } from 'lucide-react';
 
 export interface AppProps {
@@ -69,7 +72,7 @@ const SEEDED_KEY = (uid: string) => `sn_default_templates_seeded:${uid}`;
 export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway, invokeSms = invokeSmsFunction }: AppProps) {
   // Navigation / UI States
   const [composerPrefill, setComposerPrefill] = useState<ComposerPrefill | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'compose' | 'importer' | 'templates' | 'scheduler' | 'reports' | 'sms-config' | 'backup'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'compose' | 'importer' | 'moodle' | 'templates' | 'scheduler' | 'reports' | 'sms-config' | 'backup'>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
 
@@ -103,6 +106,9 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
   const [logs, setLogs] = useState<MessageLog[]>([]);
   const [campaignFlags, setCampaignFlags] = useState<CampaignFlags[]>([]);
   const [groups, setGroups] = useState<RecipientGroup[]>([]);
+  const [sectionEvents, setSectionEvents] = useState<SectionEvent[]>([]);
+  const [credentialsAvailable, setCredentialsAvailable] = useState(false);
+  const [credentialsCount, setCredentialsCount] = useState(0);
   const [includeTestStats, setIncludeTestStats] = useState(false);
   const [backupReminderDismissed, setBackupReminderDismissed] = useState(false);
   const logsRef = useRef<MessageLog[]>([]);
@@ -150,6 +156,15 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
       setLogs(data.logs);
       setCampaignFlags(data.campaignFlags ?? []);
       setGroups(data.groups ?? []);
+      setSectionEvents(data.sectionEvents ?? []);
+      try {
+        const creds = await repo.listMoodleCredentials();
+        setCredentialsAvailable(creds.available);
+        setCredentialsCount(creds.rows.length);
+      } catch {
+        setCredentialsAvailable(false);
+        setCredentialsCount(0);
+      }
       setSchoolName(readPref(UI_PREF_KEYS.schoolName) || 'مدرسة المنارة الثانوية الشاملة');
       setLoadState('ready');
     } catch (err) {
@@ -569,6 +584,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
     { id: 'overview', label: 'الرئيسية والإحصاءات', icon: LayoutDashboard },
     { id: 'compose', label: 'شاشة بث الرسائل والموجه', icon: MessageSquarePlus },
     { id: 'importer', label: 'استيراد كشف إكسل (Excel)', icon: FileSpreadsheet },
+    { id: 'moodle', label: 'أدوات مودل', icon: GraduationCap },
     { id: 'templates', label: 'قوالب ونصوص التنبيهات', icon: BookOpen },
     { id: 'scheduler', label: 'الحملات والمواعيد مجدولة', icon: Clock },
     { id: 'reports', label: 'تقارير التسليم الفورية', icon: AreaChart },
@@ -835,6 +851,13 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               groups={groups}
               onSaveGroup={handleSaveGroup}
               onDeleteGroup={handleDeleteGroup}
+              sectionEvents={sectionEvents}
+              loadMoodleCredentials={async () => {
+                const r = await repo.listMoodleCredentials();
+                setCredentialsAvailable(r.available);
+                setCredentialsCount(r.rows.length);
+                return r.rows;
+              }}
             />
           )}
 
@@ -848,6 +871,51 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               onImportComplete={handleImportComplete}
               currentStudentsCount={students.length}
               onSelectExcelBatch={handleSelectExcelBatch}
+            />
+          )}
+
+          {activeTab === 'moodle' && (
+            <MoodleTools
+              students={students}
+              sectionEvents={sectionEvents}
+              credentialsAvailable={credentialsAvailable}
+              credentialsCount={credentialsCount}
+              onPrepareCampaign={({ title, content, studentIds }) => {
+                setComposerPrefill({ campaignId: '', title, content, studentIds, phoneTarget: 'primary' });
+                setActiveTab('compose');
+                triggerNotification(`تم تجهيز حملة «${title}» لـ (${studentIds.length}) طالب. راجع النص ثم أكّد الإرسال.`, 'info');
+              }}
+              onSaveGroup={handleSaveGroup}
+              onAddTemplate={handleAddTemplate}
+              onSaveSectionEvent={async (event) => {
+                try {
+                  await repo.upsertSectionEvents([event]);
+                  setSectionEvents(prev => {
+                    const map = new Map(prev.map(e => [e.id, e]));
+                    map.set(event.id, event);
+                    return [...map.values()];
+                  });
+                  triggerNotification('تم حفظ موعد الشعبة.');
+                } catch (err) {
+                  reportError(err);
+                }
+              }}
+              onDeleteSectionEvent={async (id) => {
+                try {
+                  await repo.deleteSectionEvent(id);
+                  setSectionEvents(prev => prev.filter(e => e.id !== id));
+                } catch (err) {
+                  reportError(err);
+                }
+              }}
+              onImportCredentials={async (rows) => {
+                const n = await repo.upsertMoodleCredentials(rows);
+                const listed = await repo.listMoodleCredentials();
+                setCredentialsAvailable(listed.available);
+                setCredentialsCount(listed.rows.length);
+                triggerNotification(`تم حفظ (${n}) سجل بيانات دخول مودل في الجدول الخاص.`);
+                return n;
+              }}
             />
           )}
 
@@ -871,7 +939,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
 
           {activeTab === 'backup' && (
             <BackupPanel
-              data={{ students, templates, campaigns: scheduledMessages, logs, groups }}
+              data={{ students, templates, campaigns: scheduledMessages, logs, groups, sectionEvents }}
               repo={repo}
               onRestored={loadAll}
             />

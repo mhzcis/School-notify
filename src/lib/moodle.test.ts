@@ -82,3 +82,24 @@ describe('Moodle Excel columns', () => {
     expect(st.moodlePassword).toBeUndefined();
   });
 });
+
+describe('Moodle aliases and section placeholders', () => {
+  it('renders {{اسم_مستخدم_مودل}} / {{كلمة_مرور_مودل}} as aliases and masks the password', () => {
+    const t = 'مستخدم {{اسم_مستخدم_مودل}} كلمة {{كلمة_مرور_مودل}}';
+    expect(renderTemplate(t, fake)).toBe('مستخدم fake.user01 كلمة Fake#Pass-0001');
+    expect(renderTemplate(t, fake, { maskSecrets: true })).toBe(`مستخدم fake.user01 كلمة ${SECRET_MASK}`);
+    expect(templateUsesSecrets(t)).toBe(true);
+  });
+
+  it('fills {{رابط_الاختبار}} and {{موعد_الإغلاق}} from the section event, not from student notes', () => {
+    const t = 'شعبة {{الشعبة}} رابط {{رابط_الاختبار}} قبل {{موعد_الإغلاق}}';
+    const out = renderTemplate(t, fake, {
+      quizUrl: 'https://mhzcis.github.io/moodle-quiz-launcher/?id=111111',
+      closeDate: 'الخميس ظهراً',
+    });
+    expect(out).toBe('شعبة أ رابط https://mhzcis.github.io/moodle-quiz-launcher/?id=111111 قبل الخميس ظهراً');
+    expect(out).not.toContain('ملاحظات');
+    expect(renderTemplate(t, { ...fake, notes: 'لا تُستخدم' })).not.toContain('لا تُستخدم');
+    expect(renderTemplate(t, { ...fake, notes: 'لا تُستخدم' })).toBe('شعبة أ رابط  قبل ');
+  });
+});

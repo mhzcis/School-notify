@@ -51,7 +51,7 @@ export interface StudentRow {
 
 const STUDENT_COLUMNS = new Set(['id', 'name', 'parentName', 'phone', 'grade']);
 
-/** Must never be written to students.extra (credentials belong in a later Phase 3 table). */
+/** Must never be written to students.extra (credentials belong in student_moodle_credentials). */
 export const FORBIDDEN_STUDENT_KEYS = ['notes', 'moodlePassword', 'moodleUsername'] as const;
 
 export function stripForbiddenStudentFields<T extends Record<string, any>>(obj: T): T {
@@ -104,9 +104,19 @@ export function studentToRow(s: Student, owner: string): StudentRow {
   };
 }
 
+/** Leftover forbidden keys still sitting in a raw extra blob (not exposed on Student). */
+export function forbiddenExtraFromRow(r: StudentRow): Record<string, unknown> {
+  const extra = (r.extra && typeof r.extra === 'object') ? r.extra as Record<string, unknown> : {};
+  const out: Record<string, unknown> = {};
+  for (const k of FORBIDDEN_STUDENT_KEYS) {
+    if (extra[k] !== undefined) out[k] = extra[k];
+  }
+  return out;
+}
+
 export function rowToStudent(r: StudentRow): Student {
   const extra = (r.extra && typeof r.extra === 'object' ? r.extra : {}) as Partial<Student>;
-  return {
+  const student = {
     ...(extra as any),
     id: r.national_id || r.id || '',
     name: r.name,
@@ -118,6 +128,7 @@ export function rowToStudent(r: StudentRow): Student {
     phone2: (extra.phone2 as string) ?? '',
     email: (extra.email as string) ?? '',
   } as Student;
+  return stripForbiddenStudentFields(student as Student & Record<string, unknown>) as Student;
 }
 
 // ---------------- templates ----------------
@@ -173,6 +184,8 @@ export const campaignToRow = (c: ScheduledMessage, owner: string): CampaignRow =
     totalRecipients: c.totalRecipients,
     ...(c.isTest ? { isTest: true } : {}),
     ...(c.archived ? { archived: true } : {}),
+    ...(c.allowCredentialsAutosend ? { allowCredentialsAutosend: true } : {}),
+    ...(c.quietHoursOverride ? { quietHoursOverride: true } : {}),
   },
 });
 
@@ -193,6 +206,8 @@ export const rowToCampaign = (r: CampaignRow): ScheduledMessage => {
     totalRecipients: Number(m.totalRecipients ?? 0),
     isTest: Boolean(m.isTest),
     archived: Boolean(m.archived),
+    allowCredentialsAutosend: Boolean(m.allowCredentialsAutosend),
+    quietHoursOverride: Boolean(m.quietHoursOverride),
   };
 };
 

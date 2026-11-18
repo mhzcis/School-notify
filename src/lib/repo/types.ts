@@ -4,7 +4,9 @@
  * RLS-protected `school_notify` schema, and the in-memory fake is used by tests.
  */
 import type { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../../types';
+import type { MoodleCredential } from '../moodleCredentials';
 import type { RecipientGroup } from '../recipientGroups';
+import type { SectionEvent } from '../sectionEvents';
 
 export interface AppData {
   students: Student[];
@@ -16,6 +18,8 @@ export interface AppData {
   campaignFlags?: import('./mapping').CampaignFlags[];
   /** Named recipient groups (national IDs only). */
   groups?: RecipientGroup[];
+  /** Per-section quiz/assignment windows (no credentials). */
+  sectionEvents?: SectionEvent[];
 }
 
 export type ProgressFn = (done: number, total: number) => void;
@@ -57,6 +61,16 @@ export interface SchoolRepository {
   listRecipientGroups(): Promise<RecipientGroup[]>;
   upsertRecipientGroups(groups: RecipientGroup[]): Promise<void>;
   deleteRecipientGroup(id: string): Promise<void>;
+  /**
+   * Owner-only Moodle credentials. Returns [] and does not throw when the pending
+   * table is not applied yet (the UI must disable import/save in that case).
+   */
+  listMoodleCredentials(): Promise<{ available: boolean; rows: MoodleCredential[] }>;
+  upsertMoodleCredentials(rows: MoodleCredential[]): Promise<number>;
+  deleteMoodleCredential(nationalId: string): Promise<void>;
+  listSectionEvents(): Promise<SectionEvent[]>;
+  upsertSectionEvents(events: SectionEvent[]): Promise<void>;
+  deleteSectionEvent(id: string): Promise<void>;
 }
 
 export interface GatewayLogUpdate {

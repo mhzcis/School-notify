@@ -5,7 +5,10 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import * as XLSX from 'xlsx';
-import { renderTemplate, PLACEHOLDERS, missingMoodleFields } from '../lib/template';
+import { PLACEHOLDERS, missingMoodleFields, templateUsesCredentials } from '../lib/template';
+import { renderWithMoodle } from '../lib/moodleRender';
+import { attachCredentials, credentialsByNationalId, type MoodleCredential } from '../lib/moodleCredentials';
+import type { SectionEvent } from '../lib/sectionEvents';
 import { toAsciiDigits } from '../lib/phone';
 import { matchStudentsByNationalIds, parseNationalIds } from '../lib/nationalIds';
 import { duplicateWarningCount, findDuplicateSends, isQuietHours } from '../lib/sendSafety';
@@ -105,6 +108,9 @@ interface MessageComposerProps {
   groups?: RecipientGroup[];
   onSaveGroup?: (title: string, ids: string[]) => Promise<void> | void;
   onDeleteGroup?: (id: string) => Promise<void> | void;
+  sectionEvents?: SectionEvent[];
+  /** Loads owner-only Moodle credentials when the template needs them. Never logged. */
+  loadMoodleCredentials?: () => Promise<MoodleCredential[]>;
 }
 
 export interface ComposerPrefill {
@@ -133,6 +139,8 @@ export default function MessageComposer({
   groups = [],
   onSaveGroup,
   onDeleteGroup,
+  sectionEvents = [],
+  loadMoodleCredentials,
 }: MessageComposerProps) {
   // Campaign id of a scheduled campaign loaded via "send now"; attached to the resulting logs
   const activeCampaignIdRef = useRef<string | undefined>(undefined);
@@ -607,9 +615,17 @@ export default function MessageComposer({
     [filteredRecipients, phoneTarget]
   );
 
-  // Evaluate message template placeholders for a student (shared, tested renderer)
-  const evaluatePlaceholders = (templateStr: string, student: Student): string =>
-    renderTemplate(templateStr, student);
+  const [moodleCreds, setMoodleCreds] = useState<Map<string, MoodleCredential>>(new Map());
+  const credsRequested = useRef(false);
+
+  useEffect(() => {
+    if (!templateUsesCredentials(messageContent) || !loadMoodleCredentials || credsRequested.current) return;
+    credsRequested.current = true;
+    void loadMoodleCredentials().then(rows => setMoodleCreds(credentialsByNationalId(rows))).catch(() => { /* keep empty */ });
+  }, [messageContent, loadMoodleCredentials]);
+
+  const evaluatePlaceholders = (templateStr: string, student: Student, options?: { maskSecrets?: boolean }): string =>
+    renderWithMoodle(templateStr, student, { credentials: moodleCreds, events: sectionEvents, maskSecrets: options?.maskSecrets });
 
   // Real length of the message as rendered for the LONGEST selected recipient (Arabic: 70 / 67 per part)
   const lengthInfo = (() => {
@@ -624,13 +640,14 @@ export default function MessageComposer({
 
   // Recipients missing Moodle values that the template needs
   const moodleMissing = useMemo(
-    () => filteredRecipients.filter(st => missingMoodleFields(messageContent, st).length > 0),
-    [filteredRecipients, messageContent]
+    () => filteredRecipients.filter(st => missingMoodleFields(messageContent, attachCredentials(st, moodleCreds)).length > 0),
+    [filteredRecipients, messageContent, moodleCreds]
   );
 
   // Pre-send confirmation dialog
   const [confirmOpen, setConfirmOpen] = useState(false);
   const confirmedRef = useRef(false);
+  const confirmDecisionRef = useRef<{ quietHoursOverride: boolean; credentialsConfirmed: boolean }>({ quietHoursOverride: false, credentialsConfirmed: false });
   const confirmData = useMemo(() => {
     if (!confirmOpen) return null;
     const { items, excluded } = buildDispatchItems(filteredRecipients, phoneTarget, messageContent, evaluatePlaceholders);
@@ -841,6 +858,8 @@ export default function MessageComposer({
         scheduledTime: fullScheduledTime,
         totalRecipients: phoneTarget === 'both' ? filteredRecipients.length * 2 : filteredRecipients.length,
         isTest: isTestCampaign,
+        quietHoursOverride: confirmDecisionRef.current.quietHoursOverride,
+        allowCredentialsAutosend: templateUsesCredentials(messageContent) && confirmDecisionRef.current.credentialsConfirmed,
       });
 
       // Reset
@@ -1431,10 +1450,12 @@ export default function MessageComposer({
               : Boolean(scheduleDate && scheduleTime && isQuietHours(new Date(`${scheduleDate}T${scheduleTime}:00`)))
           }
           duplicateCount={confirmData ? duplicateWarningCount(findDuplicateSends(confirmData.items, recentLogs)) : 0}
+          requiresCredentialsConfirm={templateUsesCredentials(messageContent)}
           onCancel={() => { setConfirmOpen(false); confirmedRef.current = false; }}
-          onConfirm={() => {
+          onConfirm={(decision) => {
             setConfirmOpen(false);
             confirmedRef.current = true;
+            confirmDecisionRef.current = decision ?? { quietHoursOverride: false, credentialsConfirmed: false };
             handleDispatchCampaign({ preventDefault() {} } as React.FormEvent);
           }}
         />

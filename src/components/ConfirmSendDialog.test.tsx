@@ -135,3 +135,29 @@ describe('ConfirmSendDialog', () => {
     expect((container.querySelector('#confirm-send-button') as HTMLButtonElement).disabled).toBe(true);
   });
 });
+
+describe('ConfirmSendDialog credentials gate', () => {
+  it('blocks confirm until the extra Moodle-credentials box is ticked', () => {
+    const onConfirm = vi.fn();
+    render(
+      <ConfirmSendDialog
+        open mode="now" studentCount={1}
+        contents={[sample]}
+        excludedCount={0}
+        sampleText={sample}
+        requiresCredentialsConfirm
+        onConfirm={onConfirm} onCancel={() => {}}
+      />
+    );
+    expect(container.querySelector('#confirm-credentials-box')).toBeTruthy();
+    const btn = container.querySelector('#confirm-send-button') as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    act(() => { btn.click(); });
+    expect(onConfirm).not.toHaveBeenCalled();
+    act(() => { (container.querySelector('#confirm-credentials-override') as HTMLInputElement).click(); });
+    expect(btn.disabled).toBe(false);
+    act(() => { btn.click(); });
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onConfirm.mock.calls[0][0]).toMatchObject({ credentialsConfirmed: true });
+  });
+});

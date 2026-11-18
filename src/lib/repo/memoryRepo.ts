@@ -7,7 +7,9 @@ import type { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../
 import type { StudentEditPatch } from '../studentEdit';
 import { chunk, dedupeStudents, mergeIncomingStudent, prepareLogs } from './mapping';
 import { AppData, ProgressFn, RepoError, SchoolRepository, UPSERT_CHUNK_SIZE, GatewayLogUpdate } from './types';
+import type { MoodleCredential } from '../moodleCredentials';
 import { parseGroups, type RecipientGroup } from '../recipientGroups';
+import { parseSectionEvents, type SectionEvent } from '../sectionEvents';
 
 export class InMemorySchoolRepository implements SchoolRepository {
   students = new Map<string, Student>();
@@ -15,6 +17,10 @@ export class InMemorySchoolRepository implements SchoolRepository {
   campaigns = new Map<string, ScheduledMessage & { kind?: string }>();
   logs = new Map<string, MessageLog>();
   groups = new Map<string, RecipientGroup>();
+  credentials = new Map<string, MoodleCredential>();
+  /** When false, listMoodleCredentials reports the pending table as missing. */
+  credentialsAvailable = true;
+  sectionEvents = new Map<string, SectionEvent>();
   /** Sizes of each student upsert request (to assert chunking). */
   studentBatches: number[] = [];
   /** When set, the next call throws this error kind. */
@@ -26,6 +32,7 @@ export class InMemorySchoolRepository implements SchoolRepository {
     seed?.campaigns?.forEach(c => this.campaigns.set(c.id, { ...c, kind: 'scheduled' }));
     seed?.logs?.forEach(l => this.logs.set(l.id, { ...l }));
     seed?.groups?.forEach(g => this.groups.set(g.id, { ...g, studentNationalIds: [...g.studentNationalIds] }));
+    seed?.sectionEvents?.forEach(e => this.sectionEvents.set(e.id, { ...e }));
   }
 
   private maybeFail() {
@@ -51,6 +58,7 @@ export class InMemorySchoolRepository implements SchoolRepository {
         kind: c.kind,
       })),
       groups: [...this.groups.values()].map(g => ({ ...g, studentNationalIds: [...g.studentNationalIds] })),
+      sectionEvents: [...this.sectionEvents.values()].map(e => ({ ...e })),
     };
   }
 
@@ -179,5 +187,45 @@ export class InMemorySchoolRepository implements SchoolRepository {
   async deleteRecipientGroup(id: string): Promise<void> {
     this.maybeFail();
     this.groups.delete(id);
+  }
+
+  async listMoodleCredentials(): Promise<{ available: boolean; rows: MoodleCredential[] }> {
+    this.maybeFail();
+    if (!this.credentialsAvailable) return { available: false, rows: [] };
+    return { available: true, rows: [...this.credentials.values()].map(c => ({ ...c })) };
+  }
+
+  async upsertMoodleCredentials(rows: MoodleCredential[]): Promise<number> {
+    this.maybeFail();
+    if (!this.credentialsAvailable) throw new RepoError('other', 'credentials_unavailable');
+    let n = 0;
+    for (const r of rows) {
+      const id = String(r.nationalId ?? '').trim();
+      if (id.length < 4) continue;
+      this.credentials.set(id, { nationalId: id, moodleUsername: r.moodleUsername ?? '', moodlePassword: r.moodlePassword ?? '' });
+      n += 1;
+    }
+    return n;
+  }
+
+  async deleteMoodleCredential(nationalId: string): Promise<void> {
+    this.maybeFail();
+    if (!this.credentialsAvailable) throw new RepoError('other', 'credentials_unavailable');
+    this.credentials.delete(String(nationalId).trim());
+  }
+
+  async listSectionEvents(): Promise<SectionEvent[]> {
+    this.maybeFail();
+    return [...this.sectionEvents.values()].map(e => ({ ...e }));
+  }
+
+  async upsertSectionEvents(events: SectionEvent[]): Promise<void> {
+    this.maybeFail();
+    for (const e of parseSectionEvents(events)) this.sectionEvents.set(e.id, { ...e });
+  }
+
+  async deleteSectionEvent(id: string): Promise<void> {
+    this.maybeFail();
+    this.sectionEvents.delete(id);
   }
 }
