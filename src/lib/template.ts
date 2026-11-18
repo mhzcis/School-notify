@@ -13,11 +13,11 @@ export interface PlaceholderDef {
 /** Placeholders shown in the template pickers (order = display order). */
 export const PLACEHOLDERS: PlaceholderDef[] = [
   { tag: '{{اسم_الطالب}}', label: 'اسم الطالب الكامل' },
-  { tag: '{{الاسم_الأول}}', label: 'الاسم الأول للطالب' },
+  { tag: '{{الاسم_الكامل}}', label: 'الاسم الكامل (مرادف لاسم الطالب)' },
+  { tag: '{{الاسم_الأول}}', label: 'الاسم الأول للطالب (مع الأسماء المركبة)' },
   { tag: '{{اسم_ولي_الأمر}}', label: 'اسم ولي الأمر' },
   { tag: '{{الصف}}', label: 'الصف الدراسي' },
   { tag: '{{الشعبة}}', label: 'الشعبة' },
-  { tag: '{{ملاحظات}}', label: 'الملاحظات/المستحقات' },
   { tag: '{{اليوم}}', label: 'تاريخ اليوم' },
   { tag: '{{اسم_المستخدم}}', label: 'اسم مستخدم مودل' },
   { tag: '{{كلمة_المرور}}', label: 'كلمة مرور مودل (حساسة)', sensitive: true },
@@ -40,6 +40,7 @@ export function missingMoodleFields(template: string, student: Partial<Student>)
   return out;
 }
 
+/** @deprecated Notes are no longer stored or offered as a placeholder; kept so old tests/imports can mention the previous default. */
 export const DEFAULT_NOTES_TEXT = 'لا يوجد مستحقات متأخرة';
 
 export interface RenderOptions {
@@ -53,9 +54,26 @@ export function formatArabicDate(d: Date): string {
   return d.toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 }
 
+/** Alef variants so أبو / ابو / أبا are recognised as the same prefix. */
+function normalizeAlef(token: string): string {
+  return token.replace(/[أإآٱ]/g, 'ا');
+}
+
+const COMPOUND_FIRST_PREFIXES = new Set(['عبد', 'عبدال', 'ابو', 'ابا', 'ابي']);
+
+/**
+ * First name for {{الاسم_الأول}}. Keeps عبد / أبو / ابو (and common alef variants)
+ * together with the following token, e.g. «عبد الرحمن» not «عبد».
+ * A lone prefix with no following token is returned as-is.
+ */
 export function firstName(fullName: string | undefined | null): string {
   if (!fullName) return '';
-  return fullName.trim().split(/\s+/)[0] ?? '';
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '';
+  if (parts.length >= 2 && COMPOUND_FIRST_PREFIXES.has(normalizeAlef(parts[0]))) {
+    return `${parts[0]} ${parts[1]}`;
+  }
+  return parts[0];
 }
 
 function clean(v: unknown): string {
@@ -64,13 +82,17 @@ function clean(v: unknown): string {
 
 /** Renders a template for one student. {{اسم_الطالب}} is the FULL name. */
 export function renderTemplate(template: string, student: Partial<Student>, options: RenderOptions = {}): string {
+  const fullName = clean(student.name).replace(/\s+/g, ' ');
   const values: Record<string, string> = {
-    'اسم_الطالب': clean(student.name).replace(/\s+/g, ' '),
+    'اسم_الطالب': fullName,
+    'الاسم_الكامل': fullName,
     'الاسم_الأول': firstName(student.name),
     'اسم_ولي_الأمر': clean(student.parentName),
     'الصف': clean(student.grade),
     'الشعبة': clean(student.section),
-    'ملاحظات': clean(student.notes) || DEFAULT_NOTES_TEXT,
+    // Legacy placeholder: still rendered if an old template uses it, but never filled
+    // with a misleading default now that notes are not stored.
+    'ملاحظات': clean(student.notes),
     'اليوم': formatArabicDate(options.today ?? new Date()),
     'اسم_المستخدم': clean(student.moodleUsername),
     'كلمة_المرور': options.maskSecrets && clean(student.moodlePassword) ? SECRET_MASK : clean(student.moodlePassword),

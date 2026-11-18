@@ -20,10 +20,7 @@ export type MappedField =
   | 'phone2'
   | 'parentName'
   | 'previousYearGPA'
-  | 'notes'
-  | 'email'
-  | 'moodleUsername'
-  | 'moodlePassword';
+  | 'email';
 
 /** Same normalisation the importer already used: strip diacritics/punctuation/spaces, unify letters. */
 export function normalizeHeader(str: string): string {
@@ -58,6 +55,10 @@ const IGNORED_HEADERS = new Set(
     'اسم الأم', 'مهنة الأم', 'نوع بطاقة التعريف', 'نوع الهوية', 'رقم تسجيل الفرد', 'رقم تسجيل العائلة',
     'المنطقة', 'المدرسة', 'حالة اللجوء', 'الجنسية', 'الجنس', 'تاريخ الميلاد', 'مكان الميلاد', 'المدينة',
     'المحافظة', 'البلدة الأصلية', 'العنوان', 'الديانة', 'شبكة الأمان الاجتماعي', 'هل لديه مرض مزمن', 'يسكن في المخيم',
+    // Notes and Moodle credentials must never be imported into students.
+    'ملاحظات أو مستحقات', 'ملاحظات', 'المستحقات', 'مستحقات',
+    'اسم المستخدم', 'اسم مستخدم', 'اسم المستخدم مودل', 'اسم مستخدم مودل', 'Username', 'User Name', 'Moodle Username', 'moodle_username',
+    'كلمة المرور', 'كلمة مرور', 'كلمة المرور مودل', 'كلمة مرور مودل', 'Password', 'Moodle Password', 'moodle_password',
   ])
 );
 
@@ -114,23 +115,9 @@ const RULES: FieldRule[] = [
     containsAll: [n(['معدل'])],
   },
   {
-    field: 'notes',
-    exact: n(['ملاحظات أو مستحقات', 'ملاحظات', 'المستحقات', 'مستحقات']),
-    containsAll: [n(['ملاحظات']), n(['مستحقات'])],
-  },
-  {
     field: 'email',
     exact: n(['البريد', 'البريد الإلكتروني', 'الايميل', 'Email', 'E-mail']),
     containsAll: [n(['email']), n(['ايميل']), n(['بريد'])],
-  },
-  // Moodle credentials: EXACT headers only (no fuzzy fallback), so they can never be confused with other columns.
-  {
-    field: 'moodleUsername',
-    exact: n(['اسم المستخدم', 'اسم مستخدم', 'اسم المستخدم مودل', 'اسم مستخدم مودل', 'اسم المستخدم في مودل', 'Username', 'User Name', 'Moodle Username', 'moodle_username']),
-  },
-  {
-    field: 'moodlePassword',
-    exact: n(['كلمة المرور', 'كلمة مرور', 'كلمة المرور مودل', 'كلمة مرور مودل', 'كلمة المرور في مودل', 'كلمة المرور الافتراضية', 'Password', 'Moodle Password', 'moodle_password']),
   },
 ];
 
@@ -177,4 +164,70 @@ export function mapRowToStudentFields(row: Record<string, unknown>, headerMap: R
   }
   if (student.idNumber) student.id = student.idNumber;
   return student;
+}
+
+/** Fields the teacher may assign in the column-mapping review (never notes or Moodle credentials). */
+export const IMPORTABLE_FIELDS: MappedField[] = [
+  'name', 'nameEn', 'idNumber', 'grade', 'section', 'phone', 'phone2', 'parentName', 'previousYearGPA', 'email',
+];
+
+export const FIELD_LABELS: Record<MappedField, string> = {
+  name: 'اسم الطالب (عربي)',
+  nameEn: 'اسم الطالب (إنجليزي)',
+  idNumber: 'رقم الهوية',
+  grade: 'الصف',
+  section: 'الشعبة',
+  phone: 'الرقم 1 (الرئيسي)',
+  phone2: 'الرقم 2 (البديل)',
+  parentName: 'اسم ولي الأمر',
+  previousYearGPA: 'المعدل السابق',
+  email: 'البريد الإلكتروني',
+};
+
+export function isEnglishNameHeader(header: string): boolean {
+  const h = normalizeHeader(header);
+  return h.includes('انجليزي') || h.includes('english') || h.includes('لاتيني') || h.includes('eng');
+}
+
+export function isParentProfessionHeader(header: string): boolean {
+  const h = normalizeHeader(header);
+  return (h.includes('مهنه') || h.includes('عمل') || h.includes('وظيفه')) && (h.includes('ولي') || h.includes('اب') || h.includes('ام'));
+}
+
+export function isIgnoredHeader(header: string): boolean {
+  return IGNORED_HEADERS.has(normalizeHeader(header));
+}
+
+/**
+ * A teacher override must not bind an English-name header to the Arabic name,
+ * or a parent-profession header to the parent name, or any ignored/credential header to a field.
+ */
+export function canAssignField(header: string, field: MappedField): boolean {
+  if (isIgnoredHeader(header)) return false;
+  if (field === 'name' && isEnglishNameHeader(header)) return false;
+  if (field === 'parentName' && isParentProfessionHeader(header)) return false;
+  return true;
+}
+
+export type ColumnAssignment = MappedField | 'ignore';
+
+/** Applies teacher overrides on top of auto-mapping; illegal assignments are dropped (column ignored). */
+export function applyColumnOverrides(
+  headers: string[],
+  autoMap: Record<string, MappedField>,
+  overrides: Record<string, ColumnAssignment>
+): Record<string, MappedField> {
+  const used = new Set<MappedField>();
+  const result: Record<string, MappedField> = {};
+  for (const header of headers) {
+    const over = overrides[header];
+    if (over === 'ignore') continue;
+    const field = (over && canAssignField(header, over) ? over : autoMap[header]);
+    if (!field) continue;
+    if (!canAssignField(header, field)) continue;
+    if (used.has(field)) continue;
+    result[header] = field;
+    used.add(field);
+  }
+  return result;
 }

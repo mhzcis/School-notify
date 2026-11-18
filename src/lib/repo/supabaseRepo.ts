@@ -10,10 +10,13 @@ import {
   MessageRow,
   StudentRow,
   TemplateRow,
+  campaignFlagsFromRow,
   campaignToRow,
   chunk,
   dedupeStudents,
   logToRow,
+  FORBIDDEN_STUDENT_KEYS,
+  mergeIncomingStudent,
   prepareLogs,
   rowToCampaign,
   rowToLog,
@@ -77,6 +80,7 @@ export class SupabaseSchoolRepository implements SchoolRepository {
         templates: templates.map(rowToTemplate),
         campaigns: campaigns.filter(c => (c.meta as any)?.kind !== 'immediate').map(rowToCampaign),
         logs: messages.map(rowToLog).sort((a, b) => (a.sentTime < b.sentTime ? 1 : a.sentTime > b.sentTime ? -1 : 0)),
+        campaignFlags: campaigns.map(campaignFlagsFromRow),
       };
     } catch (err) {
       throw toRepoError(err);
@@ -85,11 +89,35 @@ export class SupabaseSchoolRepository implements SchoolRepository {
 
   async upsertStudents(students: Student[], onProgress?: ProgressFn): Promise<number> {
     const unique = dedupeStudents(students);
-    const batches = chunk(unique, UPSERT_CHUNK_SIZE);
     let done = 0;
     try {
-      for (const batch of batches) {
-        const rows = batch.map(s => studentToRow(s, this.owner));
+      const existingById = new Map<string, Student>();
+      for (const idBatch of chunk(unique.map(s => s.id), 200)) {
+        const { data, error } = await this.sb
+          .from('students')
+          .select('id,national_id,name,parent_name,phone,class_name,extra')
+          .eq('owner', this.owner)
+          .in('national_id', idBatch);
+        if (error) throw toRepoError(error);
+        for (const r of (data ?? []) as StudentRow[]) {
+          existingById.set(r.national_id, rowToStudent(r));
+          if (r.id) this.studentUuidByNationalId.set(r.national_id, r.id);
+        }
+      }
+      const merged = unique.map(s => mergeIncomingStudent(existingById.get(s.id), s));
+      for (const batch of chunk(merged, UPSERT_CHUNK_SIZE)) {
+        const rows = batch.map(s => {
+          const row = studentToRow(s, this.owner);
+          const existing = existingById.get(s.id);
+          if (existing) {
+            // studentToRow strips notes/credentials; copy any already-stored keys back so a partial upsert does not wipe them.
+            for (const k of FORBIDDEN_STUDENT_KEYS) {
+              const v = (existing as any)[k];
+              if (v !== undefined) row.extra[k] = v;
+            }
+          }
+          return row;
+        });
         const { data, error } = await this.sb
           .from('students')
           .upsert(rows, { onConflict: 'owner,national_id' })
@@ -103,6 +131,23 @@ export class SupabaseSchoolRepository implements SchoolRepository {
       throw toRepoError(err);
     }
     return done;
+  }
+
+  async insertStudent(student: Student): Promise<void> {
+    const key = String(student.id).trim();
+    if (!key) throw new RepoError('other', 'not_found');
+    const row = studentToRow(mergeIncomingStudent(undefined, { ...student, id: key }), this.owner);
+    try {
+      const { data, error } = await this.sb.from('students').insert(row).select('id,national_id');
+      if (error) {
+        if (String((error as any).code) === '23505') throw new RepoError('other', 'duplicate');
+        throw toRepoError(error);
+      }
+      const r = ((data ?? []) as { id: string; national_id: string }[])[0];
+      if (r) this.studentUuidByNationalId.set(r.national_id, r.id);
+    } catch (err) {
+      throw toRepoError(err);
+    }
   }
 
   async updateStudent(id: string, patch: StudentEditPatch): Promise<void> {
@@ -170,6 +215,21 @@ export class SupabaseSchoolRepository implements SchoolRepository {
     if (error) throw toRepoError(error);
   }
 
+  async updateCampaignFlags(id: string, flags: { isTest?: boolean; archived?: boolean }): Promise<void> {
+    try {
+      const { data, error } = await this.sb.from('campaigns').select('meta').eq('id', id).maybeSingle();
+      if (error) throw toRepoError(error);
+      if (!data) throw new RepoError('other', 'not_found');
+      const meta = { ...(((data as { meta: Record<string, unknown> | null }).meta ?? {}) as Record<string, unknown>) };
+      if (flags.isTest !== undefined) meta.isTest = flags.isTest;
+      if (flags.archived !== undefined) meta.archived = flags.archived;
+      const { error: upErr } = await this.sb.from('campaigns').update({ meta }).eq('id', id);
+      if (upErr) throw toRepoError(upErr);
+    } catch (err) {
+      throw toRepoError(err);
+    }
+  }
+
   async upsertCampaigns(campaigns: ScheduledMessage[]): Promise<void> {
     if (!campaigns.length) return;
     try {
@@ -188,13 +248,14 @@ export class SupabaseSchoolRepository implements SchoolRepository {
     const { logs: prepared, immediateCampaign } = prepareLogs(logs, this.campaignIds);
     try {
       if (immediateCampaign) {
+        const isTest = prepared.some(l => l.isTest);
         const { error } = await this.sb.from('campaigns').insert({
           id: immediateCampaign.id,
           owner: this.owner,
           title: 'إرسال فوري',
           body: immediateCampaign.body,
           status: 'completed',
-          meta: { kind: 'immediate' },
+          meta: { kind: 'immediate', ...(isTest ? { isTest: true } : {}) },
         });
         if (error) throw toRepoError(error);
         this.campaignIds.add(immediateCampaign.id);

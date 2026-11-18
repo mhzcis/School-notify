@@ -11,6 +11,8 @@ export interface AppData {
   /** Scheduled campaigns only (immediate-send campaigns are internal grouping rows). */
   campaigns: ScheduledMessage[];
   logs: MessageLog[];
+  /** Flags for every campaign row including immediate ones (meta JSON; no migration). */
+  campaignFlags?: import('./mapping').CampaignFlags[];
 }
 
 export type ProgressFn = (done: number, total: number) => void;
@@ -19,6 +21,11 @@ export interface SchoolRepository {
   loadAll(): Promise<AppData>;
   /** Insert-or-update by national id (Student.id), deduped, in chunks of UPSERT_CHUNK_SIZE. Returns rows written. */
   upsertStudents(students: Student[], onProgress?: ProgressFn): Promise<number>;
+  /**
+   * Inserts ONE new student (by national id). Throws RepoError('other', 'duplicate') if the id
+   * already exists — never overwrites. Forbidden fields (notes / Moodle credentials) are stripped.
+   */
+  insertStudent(student: Student): Promise<void>;
   /**
    * Updates ONE existing student (by national id) with only the editable fields (name, grade, section,
    * phone, phone2). Other students and all other fields (notes, Moodle data, ...) are left untouched.
@@ -30,6 +37,8 @@ export interface SchoolRepository {
   upsertTemplates(templates: MessageTemplate[]): Promise<void>;
   deleteTemplate(id: string): Promise<void>;
   upsertCampaigns(campaigns: ScheduledMessage[]): Promise<void>;
+  /** Merges isTest / archived into an existing campaign's meta JSON. Never deletes rows. */
+  updateCampaignFlags(id: string, flags: { isTest?: boolean; archived?: boolean }): Promise<void>;
   /**
    * Persists per-message history. Logs without a known campaign are grouped under a new
    * "immediate" campaign. Returns the logs as stored (ids / campaignId normalised to UUIDs).

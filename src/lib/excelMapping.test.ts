@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mapRowToStudentFields, resolveHeaderMap } from './excelMapping';
+import { applyColumnOverrides, canAssignField, mapRowToStudentFields, resolveHeaderMap } from './excelMapping';
 
 // FAKE fixtures only (column layout mirrors the app's own sample template).
 const TEMPLATE_HEADERS = [
@@ -31,6 +31,7 @@ describe('resolveHeaderMap', () => {
     expect(map['مهنة ولي الأمر']).toBeUndefined();
     expect(map['نوع بطاقة التعريف']).toBeUndefined();
     expect(map['اسم الأم']).toBeUndefined();
+    expect(map['ملاحظات أو مستحقات']).toBeUndefined();
   });
 
   it('never takes the parent job column as the parent name, regardless of column order', () => {
@@ -76,8 +77,10 @@ describe('mapRowToStudentFields', () => {
       section: 'ب',
       phone: '0599000001',
       phone2: '022000000',
-      notes: 'لا شيء',
     });
+    expect(s.notes).toBeUndefined();
+    expect(s.moodlePassword).toBeUndefined();
+    expect(s.moodleUsername).toBeUndefined();
     expect(s.parentName).not.toBe('مهنة تجريبية');
   });
 
@@ -85,5 +88,28 @@ describe('mapRowToStudentFields', () => {
     const s = mapRowToStudentFields({ 'اسم الطالب': '  ', 'الصف': 'الأول' }, resolveHeaderMap(['اسم الطالب', 'الصف']));
     expect(s.name).toBeUndefined();
     expect(s.grade).toBe('الأول');
+  });
+});
+
+describe('column review overrides', () => {
+  it('refuses to bind an English-name header to the Arabic name, or a profession header to the parent name', () => {
+    expect(canAssignField('اسم الطالب انجليزي', 'name')).toBe(false);
+    expect(canAssignField('اسم الطالب', 'name')).toBe(true);
+    expect(canAssignField('مهنة ولي الأمر', 'parentName')).toBe(false);
+    expect(canAssignField('اسم ولي الأمر', 'parentName')).toBe(true);
+    expect(canAssignField('كلمة المرور', 'name')).toBe(false);
+    expect(canAssignField('ملاحظات', 'name')).toBe(false);
+  });
+
+  it('applies teacher overrides and ignores illegal or duplicate assignments', () => {
+    const headers = ['اسم الطالب', 'اسم الطالب انجليزي', 'عمود حر'];
+    const auto = resolveHeaderMap(headers);
+    const map = applyColumnOverrides(headers, auto, { 'عمود حر': 'email', 'اسم الطالب انجليزي': 'name' });
+    expect(map['اسم الطالب']).toBe('name');
+    expect(map['اسم الطالب انجليزي']).toBe('nameEn'); // illegal override dropped, auto kept if still valid
+    expect(map['عمود حر']).toBe('email');
+    const ignored = applyColumnOverrides(headers, auto, { 'اسم الطالب': 'ignore' });
+    expect(ignored['اسم الطالب']).toBeUndefined();
+    expect(ignored['اسم الطالب انجليزي']).toBe('nameEn');
   });
 });

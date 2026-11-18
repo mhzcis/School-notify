@@ -6,6 +6,9 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { renderTemplate, PLACEHOLDERS, missingMoodleFields } from '../lib/template';
+import { toAsciiDigits } from '../lib/phone';
+import { matchStudentsByNationalIds, parseNationalIds } from '../lib/nationalIds';
+import { duplicateWarningCount, findDuplicateSends, isQuietHours } from '../lib/sendSafety';
 import SecretText from './SecretText';
 import StudentEditDialog from './StudentEditDialog';
 import type { StudentEditPatch } from '../lib/studentEdit';
@@ -95,6 +98,8 @@ interface MessageComposerProps {
   onPrefillConsumed?: () => void;
   /** Saves an edit of ONE student; resolves true on success. */
   onEditStudent?: (id: string, patch: StudentEditPatch) => Promise<boolean>;
+  /** Recent message logs, used only for the 24h duplicate-send warning. */
+  recentLogs?: MessageLog[];
 }
 
 export interface ComposerPrefill {
@@ -118,7 +123,8 @@ export default function MessageComposer({
   onClearImportedIds,
   onAddTemplate,
   prefill,
-  onPrefillConsumed
+  onPrefillConsumed,
+  recentLogs = [],
 }: MessageComposerProps) {
   // Campaign id of a scheduled campaign loaded via "send now"; attached to the resulting logs
   const activeCampaignIdRef = useRef<string | undefined>(undefined);
@@ -137,6 +143,9 @@ export default function MessageComposer({
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
+  const [idPasteText, setIdPasteText] = useState('');
+  const [idPasteReport, setIdPasteReport] = useState<{ matched: number; unknown: number } | null>(null);
+  const [isTestCampaign, setIsTestCampaign] = useState(false);
 
   // Composer states
   const [campaignTitle, setCampaignTitle] = useState<string>('حملة تواصل مدرسية');
@@ -553,12 +562,15 @@ export default function MessageComposer({
 
     if (searchTerm.trim()) {
       const query = searchTerm.toLowerCase();
+      const queryDigits = toAsciiDigits(searchTerm).replace(/\D/g, '');
       result = result.filter(s => 
         s.name.toLowerCase().includes(query) || 
         (s.nameEn && s.nameEn.toLowerCase().includes(query)) ||
         s.parentName.toLowerCase().includes(query) || 
         s.phone.includes(query) ||
-        (s.phone2 && s.phone2.includes(query))
+        (s.phone2 && s.phone2.includes(query)) ||
+        (queryDigits && toAsciiDigits(s.id || '').includes(queryDigits)) ||
+        (queryDigits && toAsciiDigits(s.idNumber || '').includes(queryDigits))
       );
     }
 
@@ -591,10 +603,16 @@ export default function MessageComposer({
   const evaluatePlaceholders = (templateStr: string, student: Student): string =>
     renderTemplate(templateStr, student);
 
-  // Real length of the message as rendered for the first selected recipient (Arabic: 70 / 67 per part)
-  const lengthInfo = segmentInfo(
-    filteredRecipients[0] ? evaluatePlaceholders(messageContent, filteredRecipients[0]) : messageContent
-  );
+  // Real length of the message as rendered for the LONGEST selected recipient (Arabic: 70 / 67 per part)
+  const lengthInfo = (() => {
+    if (!filteredRecipients.length) return segmentInfo(messageContent);
+    let longest = '';
+    for (const s of filteredRecipients) {
+      const rendered = evaluatePlaceholders(messageContent, s);
+      if (rendered.length > longest.length) longest = rendered;
+    }
+    return segmentInfo(longest);
+  })();
 
   // Recipients missing Moodle values that the template needs
   const moodleMissing = useMemo(
@@ -693,6 +711,8 @@ export default function MessageComposer({
       status: 'sent',
       channel: 'manual',
       campaignId: activeCampaignIdRef.current,
+      contentTemplate: messageContent,
+      isTest: isTestCampaign,
     };
     
     setAccumulatedManualLogs(prev => [...prev, newLog]);
@@ -740,6 +760,15 @@ export default function MessageComposer({
     setSelectedStudentIds(prev => 
       prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
     );
+  };
+
+  const applyPastedNationalIds = (raw: string) => {
+    const result = matchStudentsByNationalIds(students, raw);
+    setIdPasteReport({ matched: result.matchedIds.length, unknown: result.unknownIds.length });
+    if (result.matchedIds.length) {
+      setTargetType('custom');
+      setSelectedStudentIds(prev => Array.from(new Set([...prev, ...result.matchedIds])));
+    }
   };
 
   const selectAllFilteredStudents = () => {
@@ -802,7 +831,8 @@ export default function MessageComposer({
         targetStudentIds: filteredRecipients.map(s => s.id),
         phoneTarget: phoneTarget,
         scheduledTime: fullScheduledTime,
-        totalRecipients: phoneTarget === 'both' ? filteredRecipients.length * 2 : filteredRecipients.length
+        totalRecipients: phoneTarget === 'both' ? filteredRecipients.length * 2 : filteredRecipients.length,
+        isTest: isTestCampaign,
       });
 
       // Reset
@@ -895,6 +925,8 @@ export default function MessageComposer({
               gatewayState: r.ok ? 'Pending' : undefined,
               channel: 'gateway' as const,
               campaignId: activeCampaignIdRef.current,
+              contentTemplate: messageContent,
+              isTest: isTestCampaign,
             };
           });
           if (nothingSent) activeCampaignIdRef.current = undefined;
@@ -1198,9 +1230,62 @@ export default function MessageComposer({
                 type="text"
                 value={searchTerm}
                 onChange={e => setSearchTerm(e.target.value)}
-                placeholder="ابحث بالاسم أو الإنجليزي أو هاتف ولي الأمر..."
+                placeholder="ابحث بالاسم أو رقم الهوية أو هاتف ولي الأمر..."
                 className="w-full pr-9 pl-3 py-2 bg-slate-50 border border-slate-200 focus:border-emerald-500 rounded-xl text-xs transition outline-hidden"
               />
+            </div>
+            <div className="mt-2 space-y-1" id="paste-national-ids">
+              <label className="block text-[11px] font-bold text-slate-600">تحديد من قائمة أرقام الهوية (لصق أو ملف):</label>
+              <textarea
+                id="paste-national-ids-input"
+                value={idPasteText}
+                onChange={e => setIdPasteText(e.target.value)}
+                rows={2}
+                placeholder="الصق أرقام الهوية هنا، سطراً أو مفصولة بفاصلة"
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 focus:border-emerald-500 rounded-xl text-xs font-mono transition outline-hidden"
+              />
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  id="apply-pasted-ids"
+                  onClick={() => applyPastedNationalIds(idPasteText)}
+                  className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-50 text-emerald-800 hover:bg-emerald-100 cursor-pointer"
+                >
+                  تحديد المطابق ({parseNationalIds(idPasteText).length})
+                </button>
+                <label className="text-[11px] font-bold text-slate-500 cursor-pointer">
+                  <input
+                    type="file"
+                    accept=".txt,.csv,.xlsx,.xls"
+                    className="hidden"
+                    onChange={async e => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (!file) return;
+                      let text = '';
+                      if (/\.xlsx?$/i.test(file.name)) {
+                        const buf = await file.arrayBuffer();
+                        const wb = XLSX.read(buf, { type: 'array' });
+                        const ws = wb.Sheets[wb.SheetNames[0]];
+                        const rows = XLSX.utils.sheet_to_json(ws, { header: 1 }) as unknown[][];
+                        text = rows.map(r => (r && r[0] != null ? String(r[0]) : '')).join('\n');
+                      } else {
+                        text = await file.text();
+                      }
+                      setIdPasteText(text);
+                      applyPastedNationalIds(text);
+                    }}
+                  />
+                  أو ارفع ملف عمود واحد
+                </label>
+              </div>
+              {idPasteReport && (
+                <p className="text-[11px] text-slate-600" id="paste-ids-report">
+                  تم تحديد ({idPasteReport.matched}) طالب مطابقة
+                  {idPasteReport.unknown ? `، و({idPasteReport.unknown}) رقم هوية غير موجود` : ''}
+                  {idPasteReport.matched === 0 && idPasteReport.unknown === 0 ? ' — لم يُتعرف على أي رقم. لن يُحدد كل الطلاب.' : '.'}
+                </p>
+              )}
             </div>
           </div>
 
@@ -1315,10 +1400,17 @@ export default function MessageComposer({
           excludedCount={confirmData ? confirmData.excluded.length : 0}
           sampleText={confirmData && confirmData.items[0] ? confirmData.items[0].content : ''}
           sampleMaskedText={confirmData && confirmData.items[0] ? confirmData.items[0].logContent : undefined}
+          samples={confirmData ? confirmData.items.slice(0, 5).map(i => ({ label: i.studentName, text: i.content, maskedText: i.logContent })) : []}
           missingMoodleCount={confirmData ? moodleMissing.length : 0}
           sampleRecipientLabel={confirmData && confirmData.items[0] ? confirmData.items[0].studentName : undefined}
           scheduledLabel={deliveryMode === 'schedule' ? `${scheduleDate} ${scheduleTime}` : undefined}
-          onCancel={() => setConfirmOpen(false)}
+          quietHoursActive={
+            deliveryMode === 'now'
+              ? isQuietHours()
+              : Boolean(scheduleDate && scheduleTime && isQuietHours(new Date(`${scheduleDate}T${scheduleTime}:00`)))
+          }
+          duplicateCount={confirmData ? duplicateWarningCount(findDuplicateSends(confirmData.items, recentLogs)) : 0}
+          onCancel={() => { setConfirmOpen(false); confirmedRef.current = false; }}
           onConfirm={() => {
             setConfirmOpen(false);
             confirmedRef.current = true;
@@ -1342,6 +1434,10 @@ export default function MessageComposer({
                 className="w-full px-3.5 py-1.5 border border-slate-200 focus:border-indigo-500 rounded-lg text-xs outline-hidden"
                 required
               />
+              <label className="mt-2 flex items-center gap-2 text-[11px] font-bold text-slate-600 cursor-pointer">
+                <input id="mark-test-campaign" type="checkbox" checked={isTestCampaign} onChange={e => setIsTestCampaign(e.target.checked)} />
+                وسم هذه الحملة كـ«تجريبية» (تُستثنى من إجماليات التقارير)
+              </label>
             </div>
             <div>
               <label className="block text-xs font-bold text-slate-600 mb-1">استيراد من القوالب المحفوظة:</label>
@@ -1386,11 +1482,16 @@ export default function MessageComposer({
               className="w-full px-3 py-2 bg-slate-50 border border-slate-200 focus:border-indigo-500 rounded-xl text-xs transition outline-hidden leading-relaxed"
               required
             />
+            {/{{\s*ملاحظات\s*}}/.test(messageContent) && (
+              <div className="mt-2 p-2 rounded-lg bg-amber-50 border border-amber-200 text-[11px] text-amber-800" id="retired-notes-placeholder-warning">
+                هذا النص يستخدم {'{{ملاحظات}}'} وهو متغير لم يعد يُملأ من بيانات الطلاب. احذفها من القالب حتى لا يظهر مكانها فارغاً.
+              </div>
+            )}
             
             {/* Live SMS Characters Counter Box */}
             <div className="flex flex-wrap items-center justify-between gap-2 mt-2 bg-slate-50 border border-slate-150 p-2 rounded-lg text-xs text-slate-600 font-sans">
               <div className="flex items-center gap-3">
-                <span>الطول{filteredRecipients[0] ? ' (لأول مستلم محدد)' : ''}: <strong className="text-slate-800 font-mono font-bold">{lengthInfo.units}</strong> حرفًا</span>
+                <span>الطول{filteredRecipients.length ? ' (لأطول رسالة في التحديد)' : ''}: <strong className="text-slate-800 font-mono font-bold">{lengthInfo.units}</strong> حرفًا</span>
                 <span className="text-slate-300">|</span>
                 <span>الحجم الفعلي: <span className="bg-indigo-50 text-indigo-700 font-bold px-1.5 py-0.5 rounded-sm outline-1 outline-indigo-200">
                   {lengthInfo.segments <= 1 ? '1 جزء SMS' : `${lengthInfo.segments} أجزاء SMS`}

@@ -47,20 +47,23 @@ describe('Moodle template variables', () => {
 });
 
 describe('Moodle Excel columns', () => {
-  it('maps exact Arabic and English headers', () => {
-    expect(resolveHeaderMap(['اسم الطالب', 'الصف', 'اسم المستخدم', 'كلمة المرور'])).toMatchObject({
-      'اسم المستخدم': 'moodleUsername', 'كلمة المرور': 'moodlePassword', 'اسم الطالب': 'name',
-    });
-    expect(resolveHeaderMap(['Student', 'Username', 'Password'])).toMatchObject({
-      Username: 'moodleUsername', Password: 'moodlePassword',
-    });
+  it('does not map Moodle credential or notes headers into student fields', () => {
+    const map = resolveHeaderMap(['اسم الطالب', 'الصف', 'اسم المستخدم', 'كلمة المرور', 'ملاحظات']);
+    expect(map['اسم الطالب']).toBe('name');
+    expect(map['اسم المستخدم']).toBeUndefined();
+    expect(map['كلمة المرور']).toBeUndefined();
+    expect(map['ملاحظات']).toBeUndefined();
+    const en = resolveHeaderMap(['اسم الطالب', 'Username', 'Password']);
+    expect(en.Username).toBeUndefined();
+    expect(en.Password).toBeUndefined();
   });
 
   it('never confuses Moodle columns with the student/parent name, regardless of column order', () => {
     const map = resolveHeaderMap(['اسم المستخدم', 'كلمة المرور', 'اسم ولي الأمر', 'الصف', 'اسم الطالب']);
     expect(map['اسم الطالب']).toBe('name');
     expect(map['اسم ولي الأمر']).toBe('parentName');
-    expect(map['اسم المستخدم']).toBe('moodleUsername');
+    expect(Object.values(map)).not.toContain('moodleUsername');
+    expect(Object.values(map)).not.toContain('moodlePassword');
     // A username column without a student-name column must NOT become the name
     const only = resolveHeaderMap(['اسم مستخدم الطالب', 'الصف']);
     expect(Object.values(only)).not.toContain('name');
@@ -71,10 +74,11 @@ describe('Moodle Excel columns', () => {
     expect(Object.values(map)).not.toContain('moodlePassword');
   });
 
-  it('imports values as strings (numeric passwords keep their text)', () => {
+  it('does not import Moodle username/password values from the sheet', () => {
     const map = resolveHeaderMap(['اسم الطالب', 'الصف', 'Username', 'Password']);
     const st = mapRowToStudentFields({ 'اسم الطالب': 'طالب وهمي', 'الصف': 'الثامن', Username: 'fake02', Password: 123456 }, map);
-    expect(st.moodleUsername).toBe('fake02');
-    expect(st.moodlePassword).toBe('123456');
+    expect(st.name).toBe('طالب وهمي');
+    expect(st.moodleUsername).toBeUndefined();
+    expect(st.moodlePassword).toBeUndefined();
   });
 });

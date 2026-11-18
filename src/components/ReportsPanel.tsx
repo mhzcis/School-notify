@@ -6,16 +6,23 @@
 import { readPref, UI_PREF_KEYS } from '../lib/smsPrefs';
 import React, { useState } from 'react';
 import { CHANNEL_LABELS, STATUS_LABELS, summarizeLogs } from '../lib/logStatus';
+import { filterLogsForStats } from '../lib/reportStats';
+import type { CampaignFlags } from '../lib/repo/mapping';
 import { MessageLog } from '../types';
 import { AreaChart, Search, CheckCircle2, AlertCircle, Eye, Phone, Trash2, SlidersHorizontal, ArrowLeft, Send, Sparkles, MessageSquare, Smartphone, ExternalLink } from 'lucide-react';
 import { SECRET_MASK } from '../lib/template';
 
 interface ReportsPanelProps {
   logs: MessageLog[];
+  campaignFlags?: CampaignFlags[];
+  includeTest?: boolean;
+  onToggleIncludeTest?: (value: boolean) => void;
   onClearLogs: () => void;
   /** Re-query SMSGate for accepted/pending messages by their stored gateway ids. */
   onRefreshStatuses?: () => void | Promise<void>;
   isRefreshingStatuses?: boolean;
+  onResendFailed?: (logs: MessageLog[]) => void;
+  onToggleCampaignFlag?: (id: string, flags: { isTest?: boolean; archived?: boolean }) => void;
 }
 
 const STATUS_BADGE_CLASS: Record<string, string> = {
@@ -29,22 +36,33 @@ function log_status_text(status: string): string {
   return status === 'failed' ? 'text-rose-400' : status === 'delivered' ? 'text-emerald-400' : 'text-sky-300';
 }
 
-export default function ReportsPanel({ logs, onClearLogs, onRefreshStatuses, isRefreshingStatuses }: ReportsPanelProps) {
+export default function ReportsPanel({
+  logs,
+  campaignFlags,
+  includeTest = false,
+  onToggleIncludeTest,
+  onClearLogs,
+  onRefreshStatuses,
+  isRefreshingStatuses,
+  onResendFailed,
+}: ReportsPanelProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<'all' | 'sent' | 'delivered' | 'failed'>('all');
   const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
 
-  // Compute metrics
-  const totalCount = logs.length;
+  const visibleLogs = filterLogsForStats(logs, campaignFlags, { includeTest });
+
+  // Compute metrics from visible (non-test by default) logs
+  const totalCount = visibleLogs.length;
   // Honest metrics: 'sent' = handed to the gateway/app (no delivery receipt), never counted as failed
-  const summary = summarizeLogs(logs);
+  const summary = summarizeLogs(visibleLogs);
   const sentCount = summary.successful;
   const deliveredCount = summary.delivered;
   const failedCount = summary.failed;
   const deliveryRate = summary.successRate ?? 0;
 
   // Filter logs for display
-  const dispLogs = logs.filter(log => {
+  const dispLogs = visibleLogs.filter(log => {
     const matchSearch = 
       log.studentName.toLowerCase().includes(searchTerm.toLowerCase()) ||
       log.parentName.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -58,7 +76,7 @@ export default function ReportsPanel({ logs, onClearLogs, onRefreshStatuses, isR
     return matchSearch && matchStatus;
   });
 
-  const selectedLog = logs.find(l => l.id === selectedLogId);
+  const selectedLog = visibleLogs.find(l => l.id === selectedLogId) || logs.find(l => l.id === selectedLogId);
 
   const formatRawTime = (isoString: string) => {
     try {
@@ -79,8 +97,30 @@ export default function ReportsPanel({ logs, onClearLogs, onRefreshStatuses, isR
             تقارير وصول الرسائل وحالة التسليم الفورية
           </h2>
           <p className="text-sm text-slate-500 mt-1">تتبع نسبة وصول الإشعارات لأولياء الأمور ومعدل الاستلام الفعلي في الوقت الحقيقي</p>
+          <p className="text-[11px] text-slate-400 mt-1">الإجماليات الافتراضية تستثني الحملات التجريبية والمخفية.</p>
         </div>
 
+        {onToggleIncludeTest && (
+          <label className="text-xs font-bold text-slate-600 flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-lg cursor-pointer shrink-0">
+            <input
+              id="toggle-include-test-campaigns"
+              type="checkbox"
+              checked={includeTest}
+              onChange={e => onToggleIncludeTest(e.target.checked)}
+            />
+            إظهار التجريبي والمخفي
+          </label>
+        )}
+        {onResendFailed && visibleLogs.some(l => l.status === 'failed') && (
+          <button
+            type="button"
+            id="btn-resend-failed"
+            onClick={() => onResendFailed(visibleLogs.filter(l => l.status === 'failed'))}
+            className="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-3 py-1.5 rounded-lg transition shrink-0 self-start md:self-center"
+          >
+            إعادة إرسال الفاشلة فقط
+          </button>
+        )}
         {onRefreshStatuses && logs.some(l => l.gatewayMessageId) && (
           <button
             onClick={() => void onRefreshStatuses()}

@@ -10,6 +10,8 @@ import { checkPhone, isSendablePhone, PHONE_PROBLEM_LABELS } from '../lib/phone'
 import SecretText from './SecretText';
 import StudentEditDialog from './StudentEditDialog';
 import type { StudentEditPatch } from '../lib/studentEdit';
+import type { StudentCreatePatch } from '../lib/studentCreate';
+import StudentAddDialog from './StudentAddDialog';
 import { 
   Users2, 
   School, 
@@ -47,6 +49,7 @@ interface DashboardOverviewProps {
   onUpdateSchoolName: (name: string) => void;
   /** Saves an edit of ONE student; resolves true on success. */
   onEditStudent?: (id: string, patch: StudentEditPatch) => Promise<boolean>;
+  onAddStudent?: (patch: StudentCreatePatch) => Promise<boolean>;
 }
 
 export default function DashboardOverview({ 
@@ -56,6 +59,7 @@ export default function DashboardOverview({
   students = [],
   onUpdateStudents,
   onEditStudent,
+  onAddStudent,
   schoolName,
   onUpdateSchoolName
 }: DashboardOverviewProps) {
@@ -63,6 +67,7 @@ export default function DashboardOverview({
   // Local state for searching & filtering the student directory
   const [searchTerm, setSearchTerm] = useState('');
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
+  const [addingStudent, setAddingStudent] = useState(false);
   const [selectedGradeFilter, setSelectedGradeFilter] = useState('all');
   const [selectedSectionFilter, setSelectedSectionFilter] = useState('all');
 
@@ -361,6 +366,9 @@ export default function DashboardOverview({
 
   return (
     <div className="space-y-6" id="dashboard-overview-container">
+      {onAddStudent && (
+        <StudentAddDialog open={addingStudent} existingStudents={students} onCancel={() => setAddingStudent(false)} onSave={onAddStudent} />
+      )}
       {onEditStudent && (
         <StudentEditDialog student={editingStudent} onCancel={() => setEditingStudent(null)} onSave={onEditStudent} />
       )}
@@ -561,6 +569,16 @@ export default function DashboardOverview({
           </div>
 
           <div className="flex items-center gap-2">
+            {onAddStudent && (
+              <button
+                type="button"
+                id="add-student-button"
+                onClick={() => setAddingStudent(true)}
+                className="px-4 py-2 rounded-xl text-xs font-black bg-indigo-600 text-white hover:bg-indigo-700 cursor-pointer"
+              >
+                + إضافة طالب
+              </button>
+            )}
             <button
               onClick={() => setShowDeletionConsole(prev => !prev)}
               className={`px-4 py-2 rounded-xl text-xs font-black transition duration-150 cursor-pointer flex items-center gap-1.5 border ${

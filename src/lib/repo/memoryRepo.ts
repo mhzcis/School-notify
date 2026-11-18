@@ -5,7 +5,7 @@ import { mergeState } from '../../../supabase/functions/school-notify-sms-webhoo
  */
 import type { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../../types';
 import type { StudentEditPatch } from '../studentEdit';
-import { chunk, dedupeStudents, prepareLogs } from './mapping';
+import { chunk, dedupeStudents, mergeIncomingStudent, prepareLogs } from './mapping';
 import { AppData, ProgressFn, RepoError, SchoolRepository, UPSERT_CHUNK_SIZE, GatewayLogUpdate } from './types';
 
 export class InMemorySchoolRepository implements SchoolRepository {
@@ -40,6 +40,12 @@ export class InMemorySchoolRepository implements SchoolRepository {
       templates: [...this.templates.values()].map(t => ({ ...t })),
       campaigns: [...this.campaigns.values()].filter(c => c.kind !== 'immediate').map(({ kind: _k, ...c }) => ({ ...c })),
       logs: [...this.logs.values()].map(l => ({ ...l })),
+      campaignFlags: [...this.campaigns.values()].map(c => ({
+        id: c.id,
+        isTest: Boolean(c.isTest),
+        archived: Boolean(c.archived),
+        kind: c.kind,
+      })),
     };
   }
 
@@ -49,11 +55,22 @@ export class InMemorySchoolRepository implements SchoolRepository {
     let done = 0;
     for (const batch of chunk(unique, UPSERT_CHUNK_SIZE)) {
       this.studentBatches.push(batch.length);
-      batch.forEach(s => this.students.set(s.id, { ...s }));
+      batch.forEach(s => {
+        const key = String(s.id).trim();
+        this.students.set(key, mergeIncomingStudent(this.students.get(key), { ...s, id: key }));
+      });
       done += batch.length;
       onProgress?.(done, unique.length);
     }
     return done;
+  }
+
+  async insertStudent(student: Student): Promise<void> {
+    this.maybeFail();
+    const key = String(student.id).trim();
+    if (!key) throw new RepoError('other', 'not_found');
+    if (this.students.has(key)) throw new RepoError('other', 'duplicate');
+    this.students.set(key, mergeIncomingStudent(undefined, { ...student, id: key }));
   }
 
   async updateStudent(id: string, patch: StudentEditPatch): Promise<void> {
@@ -86,13 +103,28 @@ export class InMemorySchoolRepository implements SchoolRepository {
 
   async upsertCampaigns(campaigns: ScheduledMessage[]): Promise<void> {
     this.maybeFail();
-    campaigns.forEach(c => this.campaigns.set(c.id, { ...c, kind: 'scheduled' }));
+    campaigns.forEach(c => {
+      const prev = this.campaigns.get(c.id);
+      this.campaigns.set(c.id, { ...prev, ...c, kind: prev?.kind ?? 'scheduled' });
+    });
+  }
+
+  async updateCampaignFlags(id: string, flags: { isTest?: boolean; archived?: boolean }): Promise<void> {
+    this.maybeFail();
+    const cur = this.campaigns.get(id);
+    if (!cur) throw new RepoError('other', 'not_found');
+    this.campaigns.set(id, {
+      ...cur,
+      isTest: flags.isTest !== undefined ? flags.isTest : cur.isTest,
+      archived: flags.archived !== undefined ? flags.archived : cur.archived,
+    });
   }
 
   async addLogs(logs: MessageLog[]): Promise<MessageLog[]> {
     this.maybeFail();
     if (!logs.length) return [];
     const { logs: prepared, immediateCampaign } = prepareLogs(logs, new Set(this.campaigns.keys()));
+    const isTest = prepared.some(l => l.isTest);
     if (immediateCampaign) {
       this.campaigns.set(immediateCampaign.id, {
         id: immediateCampaign.id,
@@ -104,9 +136,10 @@ export class InMemorySchoolRepository implements SchoolRepository {
         createdAt: new Date().toISOString(),
         totalRecipients: prepared.length,
         kind: 'immediate',
+        isTest: isTest || undefined,
       });
     }
-    prepared.forEach(l => this.logs.set(l.id, { ...l }));
+    prepared.forEach(l => this.logs.set(l.id, { ...l, isTest: l.isTest || isTest || undefined }));
     return prepared;
   }
 

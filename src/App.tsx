@@ -11,6 +11,9 @@ import { DEFAULT_TEMPLATES } from './data/mockStudents';
 import DashboardOverview from './components/DashboardOverview';
 import ExcelImporter from './components/ExcelImporter';
 import { applyStudentEdit, StudentEditPatch } from './lib/studentEdit';
+import { applyStudentCreate, buildNewStudent, StudentCreatePatch } from './lib/studentCreate';
+import { mergeIncomingStudent, type CampaignFlags } from './lib/repo/mapping';
+import { filterLogsForStats, failedStudentIds, contentTemplateFromFailed } from './lib/reportStats';
 import MessageComposer, { ComposerPrefill } from './components/MessageComposer';
 import { summarizeLogs } from './lib/logStatus';
 import TemplatesManager from './components/TemplatesManager';
@@ -96,6 +99,8 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
   const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
   const [logs, setLogs] = useState<MessageLog[]>([]);
+  const [campaignFlags, setCampaignFlags] = useState<CampaignFlags[]>([]);
+  const [includeTestStats, setIncludeTestStats] = useState(false);
   const logsRef = useRef<MessageLog[]>([]);
   logsRef.current = logs;
   const [isRefreshingStatuses, setIsRefreshingStatuses] = useState(false);
@@ -139,6 +144,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
       setTemplates(tmpl);
       setScheduledMessages(data.campaigns.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)));
       setLogs(data.logs);
+      setCampaignFlags(data.campaignFlags ?? []);
       setLoadState('ready');
     } catch (err) {
       setLoadError(repoErrorMessage(err));
@@ -185,7 +191,10 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
       setStudents(prev => {
         const mergedMap = new Map<string, Student>();
         prev.forEach(s => mergedMap.set(s.id, s));
-        imported.forEach(s => mergedMap.set(String(s.id).trim(), { ...s, id: String(s.id).trim() }));
+        imported.forEach(s => {
+          const id = String(s.id).trim();
+          mergedMap.set(id, mergeIncomingStudent(mergedMap.get(id), { ...s, id }));
+        });
         return Array.from(mergedMap.values());
       });
       triggerNotification(`تم حفظ (${written}) سجل طالب في السحابة بنجاح.`);
@@ -228,6 +237,57 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
     } catch (err) {
       reportError(err);
       return false;
+    }
+  };
+
+  const handleAddStudent = async (patch: StudentCreatePatch): Promise<boolean> => {
+    const student = buildNewStudent(patch);
+    try {
+      await repo.insertStudent(student);
+      setStudents(prev => applyStudentCreate(prev, student));
+      triggerNotification('تم إضافة الطالب في السحابة.');
+      return true;
+    } catch (err) {
+      reportError(err);
+      return false;
+    }
+  };
+
+  const handleResendFailed = (sourceLogs: MessageLog[]) => {
+    const ids = failedStudentIds(sourceLogs);
+    if (!ids.length) {
+      triggerNotification('لا توجد رسائل فاشلة لإعادة إرسالها.', 'info');
+      return;
+    }
+    const tpl = contentTemplateFromFailed(sourceLogs);
+    setComposerPrefill({
+      campaignId: '', // new campaign; confirm dialog is still required
+      title: 'إعادة إرسال الفاشلة',
+      content: tpl,
+      studentIds: ids,
+      phoneTarget: 'primary',
+    });
+    setActiveTab('compose');
+    triggerNotification(`تم تحميل (${ids.length}) طالب من الرسائل الفاشلة. راجع النص ثم أكّد الإرسال.`, 'info');
+  };
+
+  const handleToggleCampaignFlag = async (id: string, flags: { isTest?: boolean; archived?: boolean }) => {
+    try {
+      await repo.updateCampaignFlags(id, flags);
+      setCampaignFlags(prev => {
+        const next = [...prev];
+        const i = next.findIndex(f => f.id === id);
+        if (i >= 0) next[i] = { ...next[i], ...flags };
+        else next.push({ id, isTest: Boolean(flags.isTest), archived: Boolean(flags.archived) });
+        return next;
+      });
+      setScheduledMessages(prev => prev.map(c => c.id === id ? { ...c, ...flags } : c));
+      if (flags.isTest !== undefined) {
+        setLogs(prev => prev.map(l => l.campaignId === id ? { ...l, isTest: flags.isTest } : l));
+      }
+      triggerNotification('تم تحديث وسم الحملة.');
+    } catch (err) {
+      reportError(err);
     }
   };
 
@@ -454,16 +514,17 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
   const distinctGrades = Array.from(new Set(students.map(s => s.grade)));
   const distinctSections = Array.from(new Set(students.map(s => s.section)));
   
+  const statsLogs = filterLogsForStats(logs, campaignFlags, { includeTest: includeTestStats });
   const stats: SchoolStats = {
     totalStudents: students.length,
     totalGrades: distinctGrades.length,
     totalSections: distinctSections.length,
     activeTemplates: templates.length,
-    scheduledCampaigns: scheduledMessages.filter(m => m.status === 'pending').length,
-    deliveredCount: logs.filter(l => l.status === 'delivered').length,
-    sentCount: logs.filter(l => l.status === 'sent').length,
-    failedCount: logs.filter(l => l.status === 'failed').length,
-    pendingCount: logs.filter(l => l.status === 'pending').length
+    scheduledCampaigns: scheduledMessages.filter(m => m.status === 'pending' && !m.isTest && !m.archived).length,
+    deliveredCount: statsLogs.filter(l => l.status === 'delivered').length,
+    sentCount: statsLogs.filter(l => l.status === 'sent').length,
+    failedCount: statsLogs.filter(l => l.status === 'failed').length,
+    pendingCount: statsLogs.filter(l => l.status === 'pending').length
   };
 
   // Left sidebar navigation menus configuration
@@ -671,6 +732,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               students={students}
               onUpdateStudents={handleUpdateStudents}
               onEditStudent={handleEditStudent}
+              onAddStudent={handleAddStudent}
               schoolName={schoolName}
               onUpdateSchoolName={handleUpdateSchoolName}
             />
@@ -691,6 +753,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               excelImportedIds={excelImportedIds}
               onClearImportedIds={() => setExcelImportedIds(null)}
               onAddTemplate={handleAddTemplate}
+              recentLogs={logs}
             />
           )}
 
@@ -721,6 +784,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               scheduledMessages={scheduledMessages}
               onCancelSchedule={handleCancelSchedule}
               onDispatchImmediately={handleDispatchImmediately}
+              onToggleCampaignFlag={handleToggleCampaignFlag}
             />
           )}
 
@@ -735,9 +799,14 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
           {activeTab === 'reports' && (
             <ReportsPanel
               logs={logs}
+              campaignFlags={campaignFlags}
+              includeTest={includeTestStats}
+              onToggleIncludeTest={setIncludeTestStats}
               onClearLogs={handleClearLogs}
               onRefreshStatuses={handleRefreshStatuses}
               isRefreshingStatuses={isRefreshingStatuses}
+              onResendFailed={handleResendFailed}
+              onToggleCampaignFlag={handleToggleCampaignFlag}
             />
           )}
         </div>

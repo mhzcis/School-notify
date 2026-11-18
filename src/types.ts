@@ -62,6 +62,10 @@ export interface ScheduledMessage {
   status: 'pending' | 'sending' | 'completed' | 'cancelled';
   createdAt: string;
   totalRecipients: number;
+  /** When true, this campaign is excluded from default report/dashboard totals. Stored in campaigns.meta. */
+  isTest?: boolean;
+  /** Hidden from default lists; stored in campaigns.meta. Does not delete rows. */
+  archived?: boolean;
 }
 
 export interface MessageLog {
@@ -80,6 +84,10 @@ export interface MessageLog {
   channel?: 'gateway' | 'manual'; // how the message was sent (optional, older logs don't have it)
   gatewayMessageId?: string; // SMSGate message id (stored in meta jsonb)
   gatewayState?: string; // last known SMSGate state, e.g. Pending/Processed/Sent/Delivered/Failed (meta jsonb)
+  /** Original campaign template (not the rendered body), stored in meta for resend. */
+  contentTemplate?: string;
+  /** Mirrors the parent campaign's test flag so totals can exclude it without a join. */
+  isTest?: boolean;
 }
 
 export interface SchoolStats {
