@@ -10,6 +10,7 @@ import { AppData, ProgressFn, RepoError, SchoolRepository, UPSERT_CHUNK_SIZE, Ga
 import type { MoodleCredential } from '../moodleCredentials';
 import { parseGroups, type RecipientGroup } from '../recipientGroups';
 import { parseSectionEvents, type SectionEvent } from '../sectionEvents';
+import { DEFAULT_MAX_PER_RUN, defaultSchedulerSettings, type SchedulerSettings } from '../scheduledSend';
 
 export class InMemorySchoolRepository implements SchoolRepository {
   students = new Map<string, Student>();
@@ -21,6 +22,7 @@ export class InMemorySchoolRepository implements SchoolRepository {
   /** When false, listMoodleCredentials reports the pending table as missing. */
   credentialsAvailable = true;
   sectionEvents = new Map<string, SectionEvent>();
+  schedulerSettings: SchedulerSettings = defaultSchedulerSettings();
   /** Sizes of each student upsert request (to assert chunking). */
   studentBatches: number[] = [];
   /** When set, the next call throws this error kind. */
@@ -227,5 +229,20 @@ export class InMemorySchoolRepository implements SchoolRepository {
   async deleteSectionEvent(id: string): Promise<void> {
     this.maybeFail();
     this.sectionEvents.delete(id);
+  }
+
+  async getSchedulerSettings(): Promise<SchedulerSettings> {
+    this.maybeFail();
+    return { ...this.schedulerSettings };
+  }
+
+  async upsertSchedulerSettings(patch: { enabled: boolean; maxPerRun?: number }): Promise<void> {
+    this.maybeFail();
+    if (!this.schedulerSettings.available) throw new RepoError('other', 'scheduler_unavailable');
+    this.schedulerSettings = {
+      available: true,
+      enabled: Boolean(patch.enabled),
+      maxPerRun: Math.max(1, Math.min(Number(patch.maxPerRun ?? this.schedulerSettings.maxPerRun) || DEFAULT_MAX_PER_RUN, 200)),
+    };
   }
 }

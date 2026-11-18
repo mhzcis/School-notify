@@ -390,3 +390,21 @@ describe('rowToStudent strips leftover credential keys from extra', () => {
     expect(s.notes).toBeUndefined();
   });
 });
+
+describe('scheduler settings (memory repo)', () => {
+  it('stays unavailable by default and refuses to enable until marked available', async () => {
+    const repo = new InMemorySchoolRepository();
+    const s = await repo.getSchedulerSettings();
+    expect(s).toEqual({ available: false, enabled: false, maxPerRun: 50 });
+    await expect(repo.upsertSchedulerSettings({ enabled: true })).rejects.toMatchObject({ message: 'scheduler_unavailable' });
+  });
+
+  it('can enable and disable only after the store is available', async () => {
+    const repo = new InMemorySchoolRepository();
+    repo.schedulerSettings = { available: true, enabled: false, maxPerRun: 50 };
+    await repo.upsertSchedulerSettings({ enabled: true, maxPerRun: 20 });
+    expect(await repo.getSchedulerSettings()).toEqual({ available: true, enabled: true, maxPerRun: 20 });
+    await repo.upsertSchedulerSettings({ enabled: false, maxPerRun: 20 });
+    expect((await repo.getSchedulerSettings()).enabled).toBe(false);
+  });
+});

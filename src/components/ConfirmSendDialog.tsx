@@ -203,7 +203,7 @@ export default function ConfirmSendDialog(props: ConfirmSendDialogProps) {
         )}
 
         {scheduledLabel && (
-          <div className="text-xs text-slate-600">موعد الجدولة: <strong>{scheduledLabel}</strong> — الحملات المجدولة تُحفظ كـ«قيد الانتظار» حتى تُرسل (الإرسال التلقائي من السيرفر مرحلة لاحقة).</div>
+          <div className="text-xs text-slate-600">موعد الجدولة: <strong>{scheduledLabel}</strong> — الحملة تُحفظ كـ«قيد الانتظار». الإرسال التلقائي لا يعمل إلا إذا فعّلته من شاشة الجدولة وبعد نشر دالة السيرفر.</div>
         )}
 
         <div className="space-y-2">

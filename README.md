@@ -106,6 +106,30 @@ Arabic notice. Phone numbers, message bodies and credentials are never logged.
 The manual WhatsApp/SMS queue (one-by-one, opened on the teacher's device) still works without the
 gateway.
 
+## Scheduled sending (server-side, off by default)
+
+Campaigns can still be reviewed and sent from the browser. Automatic server-side sending is
+implemented but **does not send anything until it is explicitly enabled after deploy**:
+
+1. Apply `supabase/pending-migrations/20261118_scheduled_send.sql` (after a cloud backup). This
+   creates `school_notify.scheduler_settings` (per-owner kill switch, default `enabled = false`)
+   and `claim_due_campaigns()` (idempotent row lock, quiet hours 22:00–07:00 Asia/Jerusalem).
+2. Deploy the Edge Function `school-notify-scheduled` (`verify_jwt = false`) with the existing
+   `SMSGATE_*` secrets plus a new `SCHEDULER_CRON_SECRET`.
+3. Set the function secret `SCHEDULER_ENABLED` to the exact value `true`. Any other value (or a
+   missing secret) makes the function return without sending.
+4. Create a cron job (pg_cron + pg_net, or another trusted scheduler) that POSTs to the function
+   with header `X-Scheduler-Secret`. The cron SQL in the migration file is commented out and must
+   not be run with a secret pasted into a script.
+5. In the app (جدولة), type «تفعيل» and turn the per-account switch on. The switch is disabled
+   until the settings table exists, and it can be turned off at any time.
+
+Due campaigns are claimed with `FOR UPDATE SKIP LOCKED`, already-logged phones are skipped
+(failed may be retried), and each run is capped by `max_per_run` (default 50). Templates that
+include Moodle credentials are not auto-sent unless the campaign was saved with
+`allowCredentialsAutosend` (from the extra confirmation on the send dialog). Quiet-hour sends
+are skipped unless `quietHoursOverride` was stored when scheduling.
+
 ## Not included
 
 The previous Express server (`server.ts`) used on Google AI Studio is not part of this
