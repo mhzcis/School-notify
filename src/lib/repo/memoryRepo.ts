@@ -7,12 +7,14 @@ import type { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../
 import type { StudentEditPatch } from '../studentEdit';
 import { chunk, dedupeStudents, mergeIncomingStudent, prepareLogs } from './mapping';
 import { AppData, ProgressFn, RepoError, SchoolRepository, UPSERT_CHUNK_SIZE, GatewayLogUpdate } from './types';
+import { parseGroups, type RecipientGroup } from '../recipientGroups';
 
 export class InMemorySchoolRepository implements SchoolRepository {
   students = new Map<string, Student>();
   templates = new Map<string, MessageTemplate>();
   campaigns = new Map<string, ScheduledMessage & { kind?: string }>();
   logs = new Map<string, MessageLog>();
+  groups = new Map<string, RecipientGroup>();
   /** Sizes of each student upsert request (to assert chunking). */
   studentBatches: number[] = [];
   /** When set, the next call throws this error kind. */
@@ -23,6 +25,7 @@ export class InMemorySchoolRepository implements SchoolRepository {
     seed?.templates?.forEach(t => this.templates.set(t.id, { ...t }));
     seed?.campaigns?.forEach(c => this.campaigns.set(c.id, { ...c, kind: 'scheduled' }));
     seed?.logs?.forEach(l => this.logs.set(l.id, { ...l }));
+    seed?.groups?.forEach(g => this.groups.set(g.id, { ...g, studentNationalIds: [...g.studentNationalIds] }));
   }
 
   private maybeFail() {
@@ -42,10 +45,12 @@ export class InMemorySchoolRepository implements SchoolRepository {
       logs: [...this.logs.values()].map(l => ({ ...l })),
       campaignFlags: [...this.campaigns.values()].map(c => ({
         id: c.id,
+        title: c.title,
         isTest: Boolean(c.isTest),
         archived: Boolean(c.archived),
         kind: c.kind,
       })),
+      groups: [...this.groups.values()].map(g => ({ ...g, studentNationalIds: [...g.studentNationalIds] })),
     };
   }
 
@@ -159,5 +164,20 @@ export class InMemorySchoolRepository implements SchoolRepository {
       done.push(u.logId);
     }
     return done;
+  }
+
+  async listRecipientGroups(): Promise<RecipientGroup[]> {
+    this.maybeFail();
+    return [...this.groups.values()].map(g => ({ ...g, studentNationalIds: [...g.studentNationalIds] }));
+  }
+
+  async upsertRecipientGroups(groups: RecipientGroup[]): Promise<void> {
+    this.maybeFail();
+    for (const g of parseGroups(groups)) this.groups.set(g.id, { ...g, studentNationalIds: [...g.studentNationalIds] });
+  }
+
+  async deleteRecipientGroup(id: string): Promise<void> {
+    this.maybeFail();
+    this.groups.delete(id);
   }
 }

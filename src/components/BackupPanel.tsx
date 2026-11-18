@@ -1,14 +1,16 @@
 /**
  * Backup export / restore screen (cloud data).
  * Restore flow: choose file -> validate -> show summary + typed confirmation ->
- * automatically download a safety backup of the CURRENT cloud data -> merge-upsert -> reload data.
+ * automatically download a safety backup of the CURRENT cloud data (without secrets) ->
+ * merge-upsert -> restore non-secret prefs -> reload data.
  */
 import React, { useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { Download, Upload, ShieldAlert, CheckCircle2, AlertCircle, DatabaseBackup, FileSpreadsheet } from 'lucide-react';
+import { Download, Upload, CheckCircle2, AlertCircle, DatabaseBackup, FileSpreadsheet } from 'lucide-react';
 import {
-  applyBackup, backupFilename, createBackup, downloadJson, studentsWorkbook, validateBackup, BackupFile, BackupSummary
+  applyBackup, backupFilename, downloadDataBackup, studentsWorkbook, validateBackup, BackupFile, BackupSummary
 } from '../lib/backup';
+import { collectBackupPrefs } from '../lib/smsPrefs';
 import { AppData, SchoolRepository, repoErrorMessage } from '../lib/repo/types';
 
 interface BackupPanelProps {
@@ -20,22 +22,25 @@ interface BackupPanelProps {
 export default function BackupPanel({ data, repo, onRestored }: BackupPanelProps) {
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
-  const [includeSecrets, setIncludeSecrets] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const [pending, setPending] = useState<{ backup: BackupFile; summary: BackupSummary; fileName: string } | null>(null);
   const [confirmText, setConfirmText] = useState('');
 
+  const snapshot = (): AppData => ({
+    ...data,
+    groups: data.groups ?? [],
+  });
+
   const handleExport = () => {
-    const backup = createBackup(data, { includeSecrets });
-    downloadJson(backup, backupFilename());
-    setMessage(`تم تنزيل النسخة الاحتياطية (${data.students.length} طالب، ${data.templates.length} قالب، ${data.campaigns.length} حملة، ${data.logs.length} سجل).`);
+    const backup = downloadDataBackup(snapshot(), { prefs: collectBackupPrefs() });
+    setMessage(`تم تنزيل النسخة الاحتياطية (${backup.data.students.length} طالب، ${backup.data.templates.length} قالب، ${backup.data.campaigns.length} حملة، ${backup.data.logs.length} سجل، ${(backup.data.groups ?? []).length} مجموعة). لا تتضمن الملف بيانات دخول مودل ولا أسرار بوابة SMS.`);
   };
 
   const handleExportExcel = () => {
-    const wb = studentsWorkbook(data.students, includeSecrets);
+    const wb = studentsWorkbook(data.students);
     XLSX.writeFile(wb, backupFilename(new Date(), 'students', 'xlsx'));
-    setMessage(`تم تنزيل كشف الطلاب (${data.students.length}) بصيغة Excel.`);
+    setMessage(`تم تنزيل كشف الطلاب (${data.students.length}) بصيغة Excel بدون الملاحظات أو بيانات الدخول.`);
   };
 
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -64,14 +69,11 @@ export default function BackupPanel({ data, repo, onRestored }: BackupPanelProps
     setBusy(true);
     setErrors([]);
     try {
-      // 1) Safety copy of the CURRENT cloud data (complete, including secrets so nothing is lost).
-      const safety = createBackup(data, { includeSecrets: true });
-      downloadJson(safety, backupFilename(new Date(), 'pre-restore'));
-      // 2) Merge the backup into the cloud.
+      downloadDataBackup(snapshot(), { label: 'pre-restore', prefs: collectBackupPrefs() });
       await applyBackup(pending.backup, repo, data.students);
       setPending(null);
       setConfirmText('');
-      setMessage('تمت الاستعادة إلى السحابة بنجاح.');
+      setMessage('تمت الاستعادة إلى السحابة بنجاح. لم يُحذف أي طالب موجود، وأُعيدت الإعدادات غير السرية.');
       await onRestored();
     } catch (err) {
       setErrors([`فشلت الاستعادة: ${repoErrorMessage(err)}`]);
@@ -89,24 +91,12 @@ export default function BackupPanel({ data, repo, onRestored }: BackupPanelProps
         </h2>
         <p className="text-sm text-slate-500 mt-1">
           البيانات محفوظة في السحابة ضمن حسابك المحمي. يمكنك تنزيل نسخة احتياطية في ملف على جهازك واستعادتها لاحقاً.
+          النسخة تشمل اسم المدرسة والإعدادات غير السرية والمجموعات المحفوظة، ولا تشمل بيانات دخول مودل ولا أسرار بوابة SMS.
         </p>
       </div>
 
-      {/* Export */}
       <section className="space-y-3">
         <h3 className="font-bold text-slate-700 text-sm">تصدير نسخة احتياطية</h3>
-        <label className="flex items-start gap-2 text-xs text-slate-600 cursor-pointer">
-          <input type="checkbox" checked={includeSecrets} onChange={e => setIncludeSecrets(e.target.checked)} className="mt-0.5" />
-          <span>
-            تضمين البيانات الحساسة (كلمات مرور Moodle للطلاب)
-          </span>
-        </label>
-        {includeSecrets && (
-          <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs">
-            <ShieldAlert className="w-4 h-4 shrink-0" />
-            <span>تحذير: الملف سيحتوي كلمات مرور كنص واضح. لا ترسله لأحد واحفظه في مكان آمن.</span>
-          </div>
-        )}
         <button
           onClick={handleExport}
           className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg flex items-center gap-2 cursor-pointer"
@@ -125,7 +115,6 @@ export default function BackupPanel({ data, repo, onRestored }: BackupPanelProps
         </button>
       </section>
 
-      {/* Restore */}
       <section className="space-y-3 pt-4 border-t border-slate-100">
         <h3 className="font-bold text-slate-700 text-sm">استعادة من نسخة احتياطية</h3>
         <p className="text-xs text-slate-500">
@@ -140,10 +129,12 @@ export default function BackupPanel({ data, repo, onRestored }: BackupPanelProps
             </div>
             <ul className="list-disc pr-5 space-y-0.5">
               <li>تاريخ التصدير: <span dir="ltr">{pending.summary.exportedAt || 'غير معروف'}</span></li>
-              <li>الطلاب: {pending.summary.students} • القوالب: {pending.summary.templates} • الحملات: {pending.summary.campaigns} • السجلات: {pending.summary.logs}</li>
-              {!pending.summary.secretsIncluded && (
-                <li className="text-amber-700">هذه النسخة لا تحتوي كلمات مرور Moodle؛ تبقى كلمات المرور المحفوظة حالياً كما هي.</li>
-              )}
+              <li>
+                الطلاب: {pending.summary.students} • القوالب: {pending.summary.templates} • الحملات: {pending.summary.campaigns} • السجلات: {pending.summary.logs}
+                {' '}• المجموعات: {pending.summary.groups}
+              </li>
+              {pending.summary.hasPrefs && <li>تتضمن هذه النسخة اسم المدرسة والإعدادات غير السرية.</li>}
+              <li className="text-amber-700">لن تُستورد كلمات مرور مودل أو الملاحظات إن وُجدت في ملف قديم. تبقى أي بيانات محفوظة حالياً كما هي.</li>
             </ul>
             <p>للتأكيد اكتب كلمة <strong>استعادة</strong>:</p>
             <input

@@ -52,9 +52,15 @@ imports are written in batches of 500.
 segment price). The data of the old browser-only version (`resal_*` keys) is **ignored**: it is not
 read, migrated or deleted.
 
-Backup (Settings → backup): JSON export of the cloud data (Moodle passwords excluded unless
-explicitly included), Excel export of students, and restore with a typed confirmation (restore
-merges/updates — it never deletes cloud rows).
+Backup (Settings → backup): JSON export of the cloud data plus non-secret settings (school name,
+send-mode, segment price, batch delay) and saved recipient groups. Moodle credentials, student
+notes, and SMSGate server secrets are never included. Restore previews the file, requires typing
+«استعادة», downloads a safety copy first, then merge-upserts by national ID (it never deletes
+cloud rows). A reminder appears if no backup was downloaded in 7 days. Reports can be exported
+to Excel (current filters, test/hidden campaigns excluded by default, per-campaign totals).
+Named recipient groups can be saved from the send screen; they sync to
+`school_notify.recipient_groups` once that pending migration is applied, and otherwise stay in
+`localStorage` + the backup file.
 
 ## SMS sending
 

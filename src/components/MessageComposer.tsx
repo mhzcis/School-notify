@@ -16,6 +16,8 @@ import { buildDispatchItems } from '../lib/recipients';
 import { matchNames } from '../lib/nameMatching';
 import { segmentInfo } from '../lib/sms';
 import ConfirmSendDialog from './ConfirmSendDialog';
+import RecipientGroupsBar from './RecipientGroupsBar';
+import type { RecipientGroup } from '../lib/recipientGroups';
 import { PHONE_PROBLEM_LABELS } from '../lib/phone';
 import { Student, MessageTemplate, ScheduledMessage, MessageLog } from '../types';
 import { readUseCloudGateway } from '../lib/smsPrefs';
@@ -100,6 +102,9 @@ interface MessageComposerProps {
   onEditStudent?: (id: string, patch: StudentEditPatch) => Promise<boolean>;
   /** Recent message logs, used only for the 24h duplicate-send warning. */
   recentLogs?: MessageLog[];
+  groups?: RecipientGroup[];
+  onSaveGroup?: (title: string, ids: string[]) => Promise<void> | void;
+  onDeleteGroup?: (id: string) => Promise<void> | void;
 }
 
 export interface ComposerPrefill {
@@ -125,6 +130,9 @@ export default function MessageComposer({
   prefill,
   onPrefillConsumed,
   recentLogs = [],
+  groups = [],
+  onSaveGroup,
+  onDeleteGroup,
 }: MessageComposerProps) {
   // Campaign id of a scheduled campaign loaded via "send now"; attached to the resulting logs
   const activeCampaignIdRef = useRef<string | undefined>(undefined);
@@ -1288,6 +1296,19 @@ export default function MessageComposer({
               )}
             </div>
           </div>
+
+          {onSaveGroup && onDeleteGroup && (
+            <RecipientGroupsBar
+              students={students}
+              selectedIds={selectedStudentIds}
+              groups={groups}
+              onSave={onSaveGroup}
+              onDelete={onDeleteGroup}
+              onApply={(ids, _skippedCount, _title) => {
+                setSelectedStudentIds(ids);
+              }}
+            />
+          )}
 
           {/* Recipients summary header & list */}
           <div className="flex-1 flex flex-col min-h-[180px]">

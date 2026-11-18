@@ -753,6 +753,7 @@ export default function ExcelImporter({
                   </div>
                 )}
 
+                <p className="mt-3 text-[11px] text-slate-500">قبل الحفظ سيتم تنزيل نسخة أمان تلقائية من بياناتك الحالية (بدون بيانات دخول مودل).</p>
                 <div className="flex items-center justify-end gap-3 mt-4 border-t border-slate-100 pt-3">
                   <button
                     onClick={clearCurrentDraft}

@@ -198,6 +198,7 @@ export const rowToCampaign = (r: CampaignRow): ScheduledMessage => {
 
 export interface CampaignFlags {
   id: string;
+  title?: string;
   isTest: boolean;
   archived: boolean;
   kind?: string;
@@ -205,7 +206,7 @@ export interface CampaignFlags {
 
 export function campaignFlagsFromRow(r: CampaignRow): CampaignFlags {
   const m = (r.meta || {}) as any;
-  return { id: r.id, isTest: Boolean(m.isTest), archived: Boolean(m.archived), kind: m.kind };
+  return { id: r.id, title: r.title, isTest: Boolean(m.isTest), archived: Boolean(m.archived), kind: m.kind };
 }
 
 // ---------------- messages ----------------

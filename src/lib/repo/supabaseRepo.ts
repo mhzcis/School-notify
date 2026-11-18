@@ -28,6 +28,14 @@ import {
 import { AppData, GatewayLogUpdate, ProgressFn, RepoError, SchoolRepository, UPSERT_CHUNK_SIZE } from './types';
 import type { StudentEditPatch } from '../studentEdit';
 import { mergeState } from '../../../supabase/functions/school-notify-sms-webhook/webhook';
+import {
+  deleteLocalGroup,
+  isMissingRelationError,
+  parseGroups,
+  readLocalGroups,
+  writeLocalGroups,
+  type RecipientGroup,
+} from '../recipientGroups';
 
 const PAGE = 1000;
 
@@ -48,6 +56,38 @@ export class SupabaseSchoolRepository implements SchoolRepository {
   private campaignIds = new Set<string>();
 
   constructor(private sb: SupabaseClient<any, any, any>, private owner: string) {}
+
+  /** 'unknown' until the first groups call; then 'cloud' or 'local' for the rest of the session. */
+  private groupsMode: 'unknown' | 'cloud' | 'local' = 'unknown';
+
+  private useLocalGroups(): boolean {
+    return this.groupsMode === 'local';
+  }
+
+  private markGroupsLocal(): void {
+    this.groupsMode = 'local';
+  }
+
+  private groupToRow(g: RecipientGroup) {
+    return {
+      id: g.id,
+      owner: this.owner,
+      title: g.title,
+      student_national_ids: g.studentNationalIds,
+      created_at: g.createdAt || new Date().toISOString(),
+      updated_at: g.updatedAt || new Date().toISOString(),
+    };
+  }
+
+  private rowToGroup(r: { id: string; title: string; student_national_ids: unknown; created_at?: string; updated_at?: string }): RecipientGroup {
+    return parseGroups([{
+      id: r.id,
+      title: r.title,
+      studentNationalIds: Array.isArray(r.student_national_ids) ? r.student_national_ids.map(String) : [],
+      createdAt: r.created_at || '',
+      updatedAt: r.updated_at || r.created_at || '',
+    }])[0];
+  }
 
   private async selectAll<T>(table: string, columns: string): Promise<T[]> {
     const out: T[] = [];
@@ -75,12 +115,19 @@ export class SupabaseSchoolRepository implements SchoolRepository {
       ]);
       this.studentUuidByNationalId = new Map(students.filter(r => r.id).map(r => [r.national_id, r.id as string]));
       this.campaignIds = new Set(campaigns.map(c => c.id));
+      let groups: RecipientGroup[] = [];
+      try {
+        groups = await this.listRecipientGroups();
+      } catch {
+        groups = readLocalGroups();
+      }
       return {
         students: students.map(rowToStudent),
         templates: templates.map(rowToTemplate),
         campaigns: campaigns.filter(c => (c.meta as any)?.kind !== 'immediate').map(rowToCampaign),
         logs: messages.map(rowToLog).sort((a, b) => (a.sentTime < b.sentTime ? 1 : a.sentTime > b.sentTime ? -1 : 0)),
         campaignFlags: campaigns.map(campaignFlagsFromRow),
+        groups,
       };
     } catch (err) {
       throw toRepoError(err);
@@ -301,5 +348,87 @@ export class SupabaseSchoolRepository implements SchoolRepository {
       throw toRepoError(err);
     }
     return done;
+  }
+
+  async listRecipientGroups(): Promise<RecipientGroup[]> {
+    if (this.useLocalGroups()) return readLocalGroups();
+    try {
+      const { data, error } = await this.sb
+        .from('recipient_groups')
+        .select('id,title,student_national_ids,created_at,updated_at')
+        .order('created_at', { ascending: true });
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.markGroupsLocal();
+          return readLocalGroups();
+        }
+        throw toRepoError(error);
+      }
+      this.groupsMode = 'cloud';
+      return parseGroups((data ?? []).map(r => this.rowToGroup(r as any)).filter(Boolean));
+    } catch (err) {
+      if (isMissingRelationError(err)) {
+        this.markGroupsLocal();
+        return readLocalGroups();
+      }
+      throw toRepoError(err);
+    }
+  }
+
+  async upsertRecipientGroups(groups: RecipientGroup[]): Promise<void> {
+    const list = parseGroups(groups);
+    if (!list.length) return;
+    if (this.useLocalGroups()) {
+      const current = readLocalGroups();
+      const map = new Map(current.map(g => [g.id, g]));
+      for (const g of list) map.set(g.id, g);
+      writeLocalGroups([...map.values()]);
+      return;
+    }
+    try {
+      const { error } = await this.sb.from('recipient_groups').upsert(list.map(g => this.groupToRow(g)), { onConflict: 'id' });
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.markGroupsLocal();
+          await this.upsertRecipientGroups(list);
+          return;
+        }
+        throw toRepoError(error);
+      }
+      this.groupsMode = 'cloud';
+    } catch (err) {
+      if (isMissingRelationError(err)) {
+        this.markGroupsLocal();
+        await this.upsertRecipientGroups(list);
+        return;
+      }
+      throw toRepoError(err);
+    }
+  }
+
+  async deleteRecipientGroup(id: string): Promise<void> {
+    if (this.useLocalGroups()) {
+      deleteLocalGroup(id);
+      return;
+    }
+    try {
+      const { error } = await this.sb.from('recipient_groups').delete().eq('id', id);
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.markGroupsLocal();
+          deleteLocalGroup(id);
+          return;
+        }
+        throw toRepoError(error);
+      }
+      this.groupsMode = 'cloud';
+    } catch (err) {
+      if (isMissingRelationError(err)) {
+        this.markGroupsLocal();
+        deleteLocalGroup(id);
+        return;
+      }
+      throw toRepoError(err);
+    }
   }
 }

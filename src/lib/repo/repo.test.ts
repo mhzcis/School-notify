@@ -5,6 +5,7 @@ import { chunk, dedupeStudents, isUuid, logToRow, mergeIncomingStudent, prepareL
 import { RepoError, UPSERT_CHUNK_SIZE, repoErrorMessage } from './types';
 import { fakeStudent, fakeStudents } from '../../test/fixtures';
 import { MessageLog } from '../../types';
+import { buildRecipientGroup, LOCAL_GROUPS_KEY } from '../recipientGroups';
 
 const OWNER = '00000000-0000-4000-8000-000000000001';
 
@@ -295,5 +296,41 @@ describe('updateStudent', () => {
   it('supabase: missing student or unexpected row count is an error (never inserts)', async () => {
     await expect(new SupabaseSchoolRepository(fakeUpdateSb(null).sb, OWNER).updateStudent('1000000001', patch)).rejects.toMatchObject({ kind: 'other' });
     await expect(new SupabaseSchoolRepository(fakeUpdateSb({}, 0).sb, OWNER).updateStudent('1000000001', patch)).rejects.toMatchObject({ kind: 'other' });
+  });
+});
+
+describe('recipient groups in the repository', () => {
+  it('in-memory: save / reload / delete a group', async () => {
+    const repo = new InMemorySchoolRepository();
+    const group = buildRecipientGroup('غير الداخلين — تجريبي', ['1000000001', '9999999999']);
+    await repo.upsertRecipientGroups([group]);
+    const listed = await repo.listRecipientGroups();
+    expect(listed).toHaveLength(1);
+    expect(listed[0].title).toBe('غير الداخلين — تجريبي');
+    await repo.deleteRecipientGroup(group.id);
+    expect(await repo.listRecipientGroups()).toHaveLength(0);
+  });
+
+  it('supabase: falls back to localStorage when the table is missing', async () => {
+    localStorage.removeItem(LOCAL_GROUPS_KEY);
+    const sb: any = {
+      from(table: string) {
+        const err = { code: 'PGRST205', message: 'Could not find the table \'public.recipient_groups\' in the schema cache' };
+        const q: any = {
+          select: () => q,
+          order: async () => ({ data: null, error: table === 'recipient_groups' ? err : null }),
+          upsert: async () => ({ error: err }),
+          delete: () => ({ eq: async () => ({ error: err }) }),
+        };
+        return q;
+      },
+    };
+    const repo = new SupabaseSchoolRepository(sb, OWNER);
+    const group = buildRecipientGroup('مجموعة محلية', ['1000000001']);
+    await repo.upsertRecipientGroups([group]);
+    const listed = await repo.listRecipientGroups();
+    expect(listed.map(g => g.title)).toEqual(['مجموعة محلية']);
+    expect(JSON.parse(localStorage.getItem(LOCAL_GROUPS_KEY) || '[]')[0].title).toBe('مجموعة محلية');
+    localStorage.removeItem(LOCAL_GROUPS_KEY);
   });
 });

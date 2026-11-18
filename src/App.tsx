@@ -23,13 +23,15 @@ import SmsGatewaySettings, { GatewayStatus } from './components/SmsGatewaySettin
 import BackupPanel from './components/BackupPanel';
 import { RepoError, SchoolRepository, repoErrorMessage } from './lib/repo/types';
 import { newId } from './lib/repo/mapping';
+import { downloadDataBackup } from './lib/backup';
+import { collectBackupPrefs, daysSinceLastBackup, isBackupReminderDue, readPref, UI_PREF_KEYS } from './lib/smsPrefs';
+import { buildRecipientGroup, type RecipientGroup } from './lib/recipientGroups';
 import { fetchStatusesOnce, FINAL_GATEWAY_STATES, GATEWAY_STATE_LABELS } from './lib/smsProxy';
 import type { ProxyInvoker, ProxyResponse, GatewayStatus as SmsGatewayState, GatewayState } from './lib/smsProxy';
 import { invokeSmsFunction } from './lib/supabase';
 import { logStatusForState, mergeState } from '../supabase/functions/school-notify-sms-webhook/webhook';
 import type { GatewayLogUpdate } from './lib/repo/types';
 import type { AuthUser } from './auth/authService';
-import { UI_PREF_KEYS } from './lib/smsPrefs';
 
 // Icons
 import { 
@@ -100,7 +102,9 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
   const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
   const [logs, setLogs] = useState<MessageLog[]>([]);
   const [campaignFlags, setCampaignFlags] = useState<CampaignFlags[]>([]);
+  const [groups, setGroups] = useState<RecipientGroup[]>([]);
   const [includeTestStats, setIncludeTestStats] = useState(false);
+  const [backupReminderDismissed, setBackupReminderDismissed] = useState(false);
   const logsRef = useRef<MessageLog[]>([]);
   logsRef.current = logs;
   const [isRefreshingStatuses, setIsRefreshingStatuses] = useState(false);
@@ -145,6 +149,8 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
       setScheduledMessages(data.campaigns.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)));
       setLogs(data.logs);
       setCampaignFlags(data.campaignFlags ?? []);
+      setGroups(data.groups ?? []);
+      setSchoolName(readPref(UI_PREF_KEYS.schoolName) || 'مدرسة المنارة الثانوية الشاملة');
       setLoadState('ready');
     } catch (err) {
       setLoadError(repoErrorMessage(err));
@@ -187,6 +193,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
   // 1. Excel Students Import Trigger (upsert by national id, chunks of 500)
   const handleImportComplete = async (imported: Student[]) => {
     try {
+      downloadDataBackup({ students, templates, campaigns: scheduledMessages, logs, groups }, { label: 'pre-import', prefs: collectBackupPrefs() });
       const written = await repo.upsertStudents(imported);
       setStudents(prev => {
         const mergedMap = new Map<string, Student>();
@@ -252,6 +259,36 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
       return false;
     }
   };
+
+  const handleSaveGroup = async (title: string, ids: string[]) => {
+    const group = buildRecipientGroup(title, ids);
+    try {
+      await repo.upsertRecipientGroups([group]);
+      setGroups(prev => {
+        const next = prev.filter(g => g.id !== group.id);
+        return [...next, group];
+      });
+      triggerNotification(`تم حفظ المجموعة «${group.title}».`);
+    } catch (err) {
+      reportError(err);
+    }
+  };
+
+  const handleDeleteGroup = async (id: string) => {
+    try {
+      await repo.deleteRecipientGroup(id);
+      setGroups(prev => prev.filter(g => g.id !== id));
+      triggerNotification('تم حذف المجموعة.');
+    } catch (err) {
+      reportError(err);
+    }
+  };
+
+  const campaignTitles = Object.fromEntries(
+    campaignFlags.map(f => [f.id, f.title || (f.kind === 'immediate' ? 'إرسال فوري' : f.title) || 'حملة']).concat(
+      scheduledMessages.map(c => [c.id, c.title])
+    )
+  );
 
   const handleResendFailed = (sourceLogs: MessageLog[]) => {
     const ids = failedStudentIds(sourceLogs);
@@ -722,6 +759,47 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
 
       {/* Primary Dashboard Content Area */}
       <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto w-full space-y-6 overflow-x-hidden">
+        {isBackupReminderDue() && !backupReminderDismissed && activeTab !== 'compose' && (
+          <div
+            id="backup-reminder-banner"
+            className="flex flex-col sm:flex-row sm:items-center gap-3 p-3 rounded-xl border border-amber-200 bg-amber-50 text-amber-900 text-xs"
+          >
+            <span className="flex-1 font-medium">
+              {daysSinceLastBackup() === null
+                ? 'لم يتم تنزيل نسخة احتياطية بعد. يُفضّل حفظ نسخة على جهازك من وقت لآخر.'
+                : `مرّت ${daysSinceLastBackup()} أيام على آخر نسخة احتياطية تم تنزيلها. يُفضّل حفظ نسخة جديدة.`}
+            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                id="btn-reminder-download-backup"
+                onClick={() => {
+                  downloadDataBackup({ students, templates, campaigns: scheduledMessages, logs, groups }, { prefs: collectBackupPrefs() });
+                  setBackupReminderDismissed(true);
+                  triggerNotification('تم تنزيل النسخة الاحتياطية.');
+                }}
+                className="px-3 py-1.5 rounded-lg bg-amber-600 text-white font-bold cursor-pointer"
+              >
+                تنزيل نسخة الآن
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('backup')}
+                className="px-3 py-1.5 rounded-lg bg-white border border-amber-300 font-bold cursor-pointer"
+              >
+                فتح النسخ الاحتياطي
+              </button>
+              <button
+                type="button"
+                id="btn-reminder-later"
+                onClick={() => setBackupReminderDismissed(true)}
+                className="px-3 py-1.5 rounded-lg text-amber-800 font-bold cursor-pointer"
+              >
+                لاحقاً
+              </button>
+            </div>
+          </div>
+        )}
         
         {/* Dynamic rendered Tab Screens */}
         <div className="animate-fade-in transition duration-300">
@@ -754,6 +832,9 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               onClearImportedIds={() => setExcelImportedIds(null)}
               onAddTemplate={handleAddTemplate}
               recentLogs={logs}
+              groups={groups}
+              onSaveGroup={handleSaveGroup}
+              onDeleteGroup={handleDeleteGroup}
             />
           )}
 
@@ -790,7 +871,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
 
           {activeTab === 'backup' && (
             <BackupPanel
-              data={{ students, templates, campaigns: scheduledMessages, logs }}
+              data={{ students, templates, campaigns: scheduledMessages, logs, groups }}
               repo={repo}
               onRestored={loadAll}
             />
@@ -807,6 +888,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               isRefreshingStatuses={isRefreshingStatuses}
               onResendFailed={handleResendFailed}
               onToggleCampaignFlag={handleToggleCampaignFlag}
+              campaignTitles={campaignTitles}
             />
           )}
         </div>
