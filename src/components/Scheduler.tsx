@@ -3,15 +3,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import { ScheduledMessage } from '../types';
-import { CalendarClock, Check, Play, Ban, Trash2, Tag, ArrowLeftRight } from 'lucide-react';
+import { CalendarClock, Check, Play, Ban, Tag } from 'lucide-react';
+import { defaultSchedulerSettings, TYPED_ENABLE_WORD, typedEnableMatches, type SchedulerSettings } from '../lib/scheduledSend';
+import { QUIET_HOURS_LABEL } from '../lib/sendSafety';
 
 interface SchedulerProps {
   scheduledMessages: ScheduledMessage[];
   onCancelSchedule: (id: string) => void;
   onDispatchImmediately: (id: string) => void;
   onToggleCampaignFlag?: (id: string, flags: { isTest?: boolean; archived?: boolean }) => void;
+  schedulerSettings?: SchedulerSettings;
+  onChangeSchedulerSettings?: (patch: { enabled: boolean; maxPerRun?: number }) => Promise<void> | void;
 }
 
 export default function Scheduler({
@@ -19,7 +23,12 @@ export default function Scheduler({
   onCancelSchedule,
   onDispatchImmediately,
   onToggleCampaignFlag,
+  schedulerSettings = defaultSchedulerSettings(),
+  onChangeSchedulerSettings,
 }: SchedulerProps) {
+  const [typedEnable, setTypedEnable] = useState('');
+  const [busy, setBusy] = useState(false);
+  const canEnable = schedulerSettings.available && !!onChangeSchedulerSettings;
 
   const getStatusBadge = (status: ScheduledMessage['status']) => {
     switch (status) {
@@ -36,9 +45,9 @@ export default function Scheduler({
 
   const getStatusLabel = (status: ScheduledMessage['status']) => {
     switch (status) {
-      case 'pending': return 'قيد الانتظار — لم يُرسل تلقائياً';
+      case 'pending': return schedulerSettings.enabled ? 'قيد الانتظار — ستُرسل تلقائياً في موعدها' : 'قيد الانتظار — لم يُرسل تلقائياً';
       case 'sending': return 'جاري الإرسال الآن';
-      case 'completed': return 'أُرسلت يدوياً';
+      case 'completed': return 'اكتملت';
       case 'cancelled': return 'ملغاة';
     }
   };
@@ -66,9 +75,86 @@ export default function Scheduler({
           جدولة وحملات الإرسال المؤجلة
         </h2>
         <p className="text-sm text-slate-500 mt-1">تتبع، عدّل أو نفِّذ فورياً حملات الإرسال التي تمت جدولتها مسبقاً</p>
-        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2" id="scheduler-not-auto-notice">
-          تنبيه: التطبيق يعمل داخل المتصفح فقط ولا يرسل الحملات المجدولة تلقائياً في موعدها. عند حلول الموعد افتح الحملة واضغط «مراجعة وإرسال الآن».
-        </p>
+        <div className="text-xs rounded-lg px-3 py-3 mt-3 space-y-2 border border-amber-200 bg-amber-50 text-amber-900" id="scheduler-autosend-box">
+          {!schedulerSettings.available ? (
+            <p id="scheduler-not-auto-notice">
+              الإرسال التلقائي من السيرفر غير مفعّل بعد على السحابة. الحملات تبقى «قيد الانتظار» حتى تضغط «مراجعة وإرسال الآن»، أو حتى تتم الموافقة على ترحيل الجدولة ونشر الدالة وجدول cron وتعيين أسرار التفعيل (انظر ملف الترحيل). المفتاح في التطبيق يبقى مغلقاً حتى ذلك الحين.
+            </p>
+          ) : schedulerSettings.enabled ? (
+            <p id="scheduler-auto-on-notice">
+              الإرسال التلقائي <strong>مفعّل لحسابك</strong>. الحملات المستحقة تُرسل من السيرفر في موعدها، مع احترام ساعات الهدوء ({QUIET_HOURS_LABEL}) وبحد أقصى {schedulerSettings.maxPerRun} رسالة في كل دورة. يبقى الإرسال متوقفاً على مستوى المشروع إذا لم تُضبط أسرار الدالة (SCHEDULER_ENABLED=true). يمكنك الإيقاف في أي لحظة.
+            </p>
+          ) : (
+            <p id="scheduler-not-auto-notice">
+              الإرسال التلقائي <strong>متوقف لحسابك</strong> (الوضع الافتراضي). الحملات المجدولة لا تُرسل وحدها حتى تفعّله أدناه، وبعد أن تكون دالة السيرفر وجدول cron وأسرار التفعيل جاهزة.
+            </p>
+          )}
+          {canEnable && (
+            <div className="space-y-2 pt-1">
+              <label className="block font-bold">
+                الحد الأقصى للرسائل في كل دورة
+                <input
+                  id="scheduler-max-per-run"
+                  type="number"
+                  min={1}
+                  max={200}
+                  className="mt-1 w-28 border border-amber-300 rounded-md px-2 py-1 font-mono"
+                  defaultValue={schedulerSettings.maxPerRun}
+                  onBlur={e => {
+                    const n = Math.max(1, Math.min(Number(e.target.value) || schedulerSettings.maxPerRun, 200));
+                    if (n !== schedulerSettings.maxPerRun) void onChangeSchedulerSettings({ enabled: schedulerSettings.enabled, maxPerRun: n });
+                  }}
+                />
+              </label>
+              {schedulerSettings.enabled ? (
+                <button
+                  type="button"
+                  id="scheduler-disable-auto"
+                  disabled={busy}
+                  className="px-3 py-1.5 rounded-lg border border-rose-300 text-rose-800 bg-white font-bold cursor-pointer"
+                  onClick={async () => {
+                    setBusy(true);
+                    try { await onChangeSchedulerSettings({ enabled: false, maxPerRun: schedulerSettings.maxPerRun }); }
+                    finally { setBusy(false); }
+                  }}
+                >
+                  إيقاف الإرسال التلقائي
+                </button>
+              ) : (
+                <div className="space-y-1">
+                  <label className="block font-bold" htmlFor="scheduler-enable-typed">
+                    لتفعيل الإرسال التلقائي اكتب «{TYPED_ENABLE_WORD}» ثم اضغط الزر. لن يُرسل شيء إذا كانت أسرار السيرفر أو cron غير جاهزة.
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    <input
+                      id="scheduler-enable-typed"
+                      value={typedEnable}
+                      onChange={e => setTypedEnable(e.target.value)}
+                      className="border border-amber-300 rounded-md px-2 py-1 w-36"
+                      placeholder={TYPED_ENABLE_WORD}
+                    />
+                    <button
+                      type="button"
+                      id="scheduler-enable-auto"
+                      disabled={busy || !typedEnableMatches(typedEnable)}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-700 disabled:opacity-50 text-white font-bold cursor-pointer"
+                      onClick={async () => {
+                        if (!typedEnableMatches(typedEnable)) return;
+                        setBusy(true);
+                        try {
+                          await onChangeSchedulerSettings({ enabled: true, maxPerRun: schedulerSettings.maxPerRun });
+                          setTypedEnable('');
+                        } finally { setBusy(false); }
+                      }}
+                    >
+                      تفعيل الإرسال التلقائي
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {scheduledMessages.length === 0 ? (

@@ -28,6 +28,7 @@ import { downloadDataBackup } from './lib/backup';
 import { collectBackupPrefs, daysSinceLastBackup, isBackupReminderDue, readPref, UI_PREF_KEYS } from './lib/smsPrefs';
 import { buildRecipientGroup, type RecipientGroup } from './lib/recipientGroups';
 import type { SectionEvent } from './lib/sectionEvents';
+import { defaultSchedulerSettings, type SchedulerSettings } from './lib/scheduledSend';
 import { fetchStatusesOnce, FINAL_GATEWAY_STATES, GATEWAY_STATE_LABELS } from './lib/smsProxy';
 import type { ProxyInvoker, ProxyResponse, GatewayStatus as SmsGatewayState, GatewayState } from './lib/smsProxy';
 import { invokeSmsFunction } from './lib/supabase';
@@ -109,6 +110,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
   const [sectionEvents, setSectionEvents] = useState<SectionEvent[]>([]);
   const [credentialsAvailable, setCredentialsAvailable] = useState(false);
   const [credentialsCount, setCredentialsCount] = useState(0);
+  const [schedulerSettings, setSchedulerSettings] = useState<SchedulerSettings>(defaultSchedulerSettings);
   const [includeTestStats, setIncludeTestStats] = useState(false);
   const [backupReminderDismissed, setBackupReminderDismissed] = useState(false);
   const logsRef = useRef<MessageLog[]>([]);
@@ -164,6 +166,11 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
       } catch {
         setCredentialsAvailable(false);
         setCredentialsCount(0);
+      }
+      try {
+        setSchedulerSettings(await repo.getSchedulerSettings());
+      } catch {
+        setSchedulerSettings(defaultSchedulerSettings());
       }
       setSchoolName(readPref(UI_PREF_KEYS.schoolName) || 'مدرسة المنارة الثانوية الشاملة');
       setLoadState('ready');
@@ -934,6 +941,12 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               onCancelSchedule={handleCancelSchedule}
               onDispatchImmediately={handleDispatchImmediately}
               onToggleCampaignFlag={handleToggleCampaignFlag}
+              schedulerSettings={schedulerSettings}
+              onChangeSchedulerSettings={async (patch) => {
+                await repo.upsertSchedulerSettings(patch);
+                setSchedulerSettings(await repo.getSchedulerSettings());
+                triggerNotification(patch.enabled ? 'تم تفعيل الإرسال التلقائي لحسابك. لن يُرسل شيء حتى تكون دالة السيرفر وcron وأسرار التفعيل جاهزة.' : 'تم إيقاف الإرسال التلقائي لحسابك.');
+              }}
             />
           )}
 

@@ -43,6 +43,7 @@ import {
   writeLocalSectionEvents,
   type SectionEvent,
 } from '../sectionEvents';
+import { DEFAULT_MAX_PER_RUN, defaultSchedulerSettings, type SchedulerSettings } from '../scheduledSend';
 
 const PAGE = 1000;
 
@@ -492,6 +493,39 @@ export class SupabaseSchoolRepository implements SchoolRepository {
     }
   }
 
+  private schedulerMode: 'unknown' | 'cloud' | 'unavailable' = 'unknown';
+
+  async getSchedulerSettings(): Promise<SchedulerSettings> {
+    if (this.schedulerMode === 'unavailable') return defaultSchedulerSettings();
+    try {
+      const { data, error } = await this.sb
+        .from('scheduler_settings')
+        .select('enabled,max_per_run')
+        .eq('owner', this.owner)
+        .maybeSingle();
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.schedulerMode = 'unavailable';
+          return defaultSchedulerSettings();
+        }
+        throw toRepoError(error);
+      }
+      this.schedulerMode = 'cloud';
+      if (!data) return { available: true, enabled: false, maxPerRun: DEFAULT_MAX_PER_RUN };
+      return {
+        available: true,
+        enabled: Boolean(data.enabled),
+        maxPerRun: Math.max(1, Math.min(Number(data.max_per_run) || DEFAULT_MAX_PER_RUN, 200)),
+      };
+    } catch (err) {
+      if (isMissingRelationError(err)) {
+        this.schedulerMode = 'unavailable';
+        return defaultSchedulerSettings();
+      }
+      throw toRepoError(err);
+    }
+  }
+
   async upsertMoodleCredentials(rows: MoodleCredential[]): Promise<number> {
     const unique = new Map<string, MoodleCredential>();
     for (const r of rows) {
@@ -661,6 +695,34 @@ export class SupabaseSchoolRepository implements SchoolRepository {
         this.eventsMode = 'local';
         writeLocalSectionEvents(readLocalSectionEvents().filter(e => e.id !== id));
         return;
+      }
+      throw toRepoError(err);
+    }
+  }
+
+  async upsertSchedulerSettings(patch: { enabled: boolean; maxPerRun?: number }): Promise<void> {
+    if (this.schedulerMode === 'unavailable') throw new RepoError('other', 'scheduler_unavailable');
+    const maxPerRun = Math.max(1, Math.min(Number(patch.maxPerRun) || DEFAULT_MAX_PER_RUN, 200));
+    try {
+      const { error } = await this.sb.from('scheduler_settings').upsert({
+        owner: this.owner,
+        enabled: Boolean(patch.enabled),
+        max_per_run: maxPerRun,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'owner' });
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.schedulerMode = 'unavailable';
+          throw new RepoError('other', 'scheduler_unavailable');
+        }
+        throw toRepoError(error);
+      }
+      this.schedulerMode = 'cloud';
+    } catch (err) {
+      if (err instanceof RepoError) throw err;
+      if (isMissingRelationError(err)) {
+        this.schedulerMode = 'unavailable';
+        throw new RepoError('other', 'scheduler_unavailable');
       }
       throw toRepoError(err);
     }

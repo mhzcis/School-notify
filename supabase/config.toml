@@ -1,0 +1,4 @@
+# Local / CLI config. The scheduled sender is invoked by cron (or another
+# trusted caller) with X-Scheduler-Secret, not a user JWT.
+[functions.school-notify-scheduled]
+verify_jwt = false

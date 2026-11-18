@@ -7,6 +7,7 @@ import type { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../
 import type { MoodleCredential } from '../moodleCredentials';
 import type { RecipientGroup } from '../recipientGroups';
 import type { SectionEvent } from '../sectionEvents';
+import type { SchedulerSettings } from '../scheduledSend';
 
 export interface AppData {
   students: Student[];
@@ -71,6 +72,9 @@ export interface SchoolRepository {
   listSectionEvents(): Promise<SectionEvent[]>;
   upsertSectionEvents(events: SectionEvent[]): Promise<void>;
   deleteSectionEvent(id: string): Promise<void>;
+  /** Auto-send kill switch. available=false when the pending table is not applied (treated as off). */
+  getSchedulerSettings(): Promise<SchedulerSettings>;
+  upsertSchedulerSettings(patch: { enabled: boolean; maxPerRun?: number }): Promise<void>;
 }
 
 export interface GatewayLogUpdate {
