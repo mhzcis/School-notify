@@ -2,13 +2,19 @@
  * Cloud data backup export / restore.
  *
  * A backup is a JSON snapshot of the signed-in account's cloud data (students, templates,
- * scheduled campaigns, message logs). Restore MERGES the file into the cloud via the repository
- * (upsert by national id / record id) — it never deletes existing cloud records.
- * Legacy v1 files (raw browser localStorage dumps) are rejected: old local data is not migrated.
+ * scheduled campaigns, message logs, named recipient groups) plus non-secret UI prefs
+ * (school name, send-mode, segment price, batch delay). Restore MERGES the file into the
+ * cloud via the repository (upsert by national id / record id) — it never deletes existing
+ * cloud records. Legacy v1 files (raw browser localStorage dumps) are rejected.
+ *
+ * Moodle credentials, student notes, and SMSGate server secrets are never written into the
+ * file and are never re-imported from an older file that still contained them.
  */
 import * as XLSX from 'xlsx';
 import { AppData, SchoolRepository } from './repo/types';
-import { isUuid, newId } from './repo/mapping';
+import { FORBIDDEN_STUDENT_KEYS, isUuid, newId, stripForbiddenStudentFields } from './repo/mapping';
+import { applyBackupPrefs, collectBackupPrefs, markBackupDownloaded, type BackupPrefs } from './smsPrefs';
+import { parseGroups } from './recipientGroups';
 import { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../types';
 
 export const BACKUP_FORMAT = 'school-notify-cloud-backup';
@@ -19,8 +25,10 @@ export interface BackupFile {
   format: typeof BACKUP_FORMAT;
   version: number;
   exportedAt: string;
-  secretsIncluded: boolean;
+  /** Always false: secrets are never included in a backup file. Kept for compatibility with older readers. */
+  secretsIncluded: false;
   data: AppData;
+  prefs?: BackupPrefs;
 }
 
 export interface BackupSummary {
@@ -28,6 +36,8 @@ export interface BackupSummary {
   templates: number;
   campaigns: number;
   logs: number;
+  groups: number;
+  hasPrefs: boolean;
   secretsIncluded: boolean;
   exportedAt: string;
 }
@@ -46,29 +56,31 @@ export function backupFilename(date: Date = new Date(), label = 'backup', ext = 
   return `school-notify-${label}-${stamp}.${ext}`;
 }
 
-/** Student fields treated as secrets (Moodle default password). */
-export const STUDENT_SECRET_FIELDS = ['moodlePassword'] as const;
+/** Student fields that must never appear in a backup or student Excel export. */
+export const STUDENT_SECRET_FIELDS = FORBIDDEN_STUDENT_KEYS;
 
-export function stripStudentSecrets(students: Student[]): Student[] {
+export function sanitizeStudentsForBackup(students: Student[]): Student[] {
   return students.map(s => {
-    const copy: any = { ...s };
-    for (const f of STUDENT_SECRET_FIELDS) if (f in copy) copy[f] = '';
-    return copy as Student;
+    const copy = stripForbiddenStudentFields({ ...s } as Student & Record<string, unknown>) as Student;
+    for (const f of STUDENT_SECRET_FIELDS) delete (copy as any)[f];
+    return copy;
   });
 }
 
-export function createBackup(data: AppData, opts: { includeSecrets?: boolean; now?: Date } = {}): BackupFile {
-  const includeSecrets = !!opts.includeSecrets;
+export function createBackup(data: AppData, opts: { now?: Date; prefs?: BackupPrefs } = {}): BackupFile {
+  const prefs = opts.prefs ?? collectBackupPrefs();
   return {
     format: BACKUP_FORMAT,
     version: BACKUP_FORMAT_VERSION,
     exportedAt: (opts.now ?? new Date()).toISOString(),
-    secretsIncluded: includeSecrets,
+    secretsIncluded: false,
+    prefs: { ...prefs },
     data: {
-      students: includeSecrets ? data.students : stripStudentSecrets(data.students),
+      students: sanitizeStudentsForBackup(data.students),
       templates: data.templates,
       campaigns: data.campaigns,
       logs: data.logs,
+      groups: parseGroups(data.groups ?? []),
     },
   };
 }
@@ -99,6 +111,8 @@ export function validateBackup(text: string): ValidationResult {
   for (const k of ['students', 'templates', 'campaigns', 'logs']) {
     if (!Array.isArray(d[k])) errors.push(`الحقل "${k}" مفقود أو ليس قائمة.`);
   }
+  if (d.groups !== undefined && !Array.isArray(d.groups)) errors.push('الحقل "groups" ليس قائمة.');
+  if (parsed.prefs !== undefined && !isObj(parsed.prefs)) errors.push('حقل الإعدادات غير صالح.');
   if (errors.length) return { ok: false, errors };
   const badStudents = (d.students as unknown[]).filter(s => !isObj(s) || !String((s as any).id ?? '').trim() || typeof (s as any).name !== 'string');
   if (badStudents.length) errors.push(`يوجد (${badStudents.length}) سجل طالب بدون رقم هوية أو اسم.`);
@@ -110,7 +124,21 @@ export function validateBackup(text: string): ValidationResult {
   if (badLogs.length) errors.push(`يوجد (${badLogs.length}) سجل إرسال غير صالح.`);
   if (errors.length) return { ok: false, errors };
 
-  const backup = parsed as unknown as BackupFile;
+  const groups = parseGroups(d.groups ?? []);
+  const backup: BackupFile = {
+    format: BACKUP_FORMAT,
+    version: parsed.version,
+    exportedAt: typeof parsed.exportedAt === 'string' ? parsed.exportedAt : '',
+    secretsIncluded: false,
+    prefs: isObj(parsed.prefs) ? (parsed.prefs as BackupPrefs) : undefined,
+    data: {
+      students: sanitizeStudentsForBackup(d.students as Student[]),
+      templates: d.templates as MessageTemplate[],
+      campaigns: d.campaigns as ScheduledMessage[],
+      logs: d.logs as MessageLog[],
+      groups,
+    },
+  };
   return {
     ok: true,
     backup,
@@ -119,8 +147,10 @@ export function validateBackup(text: string): ValidationResult {
       templates: d.templates.length,
       campaigns: d.campaigns.length,
       logs: d.logs.length,
-      secretsIncluded: !!parsed.secretsIncluded,
-      exportedAt: typeof parsed.exportedAt === 'string' ? parsed.exportedAt : '',
+      groups: groups.length,
+      hasPrefs: !!backup.prefs,
+      secretsIncluded: false,
+      exportedAt: backup.exportedAt,
     },
   };
 }
@@ -128,23 +158,17 @@ export function validateBackup(text: string): ValidationResult {
 /**
  * Merges a validated backup into the cloud. Existing records with the same national id / id are
  * updated; nothing is deleted. Template/campaign ids that are not UUIDs get fresh ids.
+ * Incoming notes / Moodle credentials are stripped; any already stored in the cloud are kept.
+ * Non-secret prefs are written to localStorage.
  */
 export async function applyBackup(
   backup: BackupFile,
   repo: SchoolRepository,
-  currentStudents: Student[] = [],
+  _currentStudents: Student[] = [],
   onProgress?: (stage: string) => void
 ): Promise<void> {
   const d = backup.data;
-  let students = d.students as Student[];
-  if (!backup.secretsIncluded) {
-    // A backup without secrets must not wipe the Moodle passwords already stored in the cloud.
-    const existing = new Map(currentStudents.map(s => [String(s.id).trim(), (s as any).moodlePassword]));
-    students = students.map(s => {
-      const pw = existing.get(String(s.id).trim());
-      return pw && !(s as any).moodlePassword ? ({ ...s, moodlePassword: pw } as Student) : s;
-    });
-  }
+  const students = sanitizeStudentsForBackup(d.students as Student[]);
   onProgress?.('students');
   await repo.upsertStudents(students);
   onProgress?.('templates');
@@ -163,11 +187,17 @@ export async function applyBackup(
     l.campaignId && campaignIdMap.has(l.campaignId) ? { ...l, campaignId: campaignIdMap.get(l.campaignId) } : l
   );
   await repo.addLogs(logs);
+  const groups = parseGroups(d.groups ?? []);
+  if (groups.length) {
+    onProgress?.('groups');
+    await repo.upsertRecipientGroups(groups);
+  }
+  if (backup.prefs) applyBackupPrefs(backup.prefs);
 }
 
-/** Excel workbook of the students (secrets blanked unless includeSecrets). */
-export function studentsWorkbook(students: Student[], includeSecrets = false): XLSX.WorkBook {
-  const rows = (includeSecrets ? students : stripStudentSecrets(students)).map(s => ({
+/** Excel workbook of the students (notes and credentials are never included). */
+export function studentsWorkbook(students: Student[]): XLSX.WorkBook {
+  const rows = sanitizeStudentsForBackup(students).map(s => ({
     'رقم الهوية': s.id,
     'اسم الطالب': s.name,
     'اسم الطالب بالإنجليزية': s.nameEn ?? '',
@@ -177,7 +207,6 @@ export function studentsWorkbook(students: Student[], includeSecrets = false): X
     'الصف': s.grade ?? '',
     'الشعبة': s.section ?? '',
     'البريد الإلكتروني': s.email ?? '',
-    ...(includeSecrets ? { 'كلمة مرور Moodle': (s as any).moodlePassword ?? '' } : {}),
   }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'الطلاب');
@@ -194,4 +223,17 @@ export function downloadJson(obj: unknown, filename: string): void {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Downloads a JSON backup of the current data and records the reminder timestamp. */
+export function downloadDataBackup(data: AppData, opts: { label?: string; prefs?: BackupPrefs; now?: Date } = {}): BackupFile {
+  const backup = createBackup(data, { prefs: opts.prefs, now: opts.now });
+  downloadJson(backup, backupFilename(opts.now ?? new Date(), opts.label ?? 'backup'));
+  markBackupDownloaded(opts.now ?? new Date());
+  return backup;
+}
+
+/** True if a JSON string appears to contain Moodle credentials or SMSGate secrets. */
+export function backupTextLooksSensitive(text: string): boolean {
+  return /moodlePassword"\s*:\s*"[^"]+"|SMSGATE_|smsgate password|webhook.signing|encryption.passphrase/i.test(text);
 }

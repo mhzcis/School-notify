@@ -4,13 +4,16 @@
  */
 
 import { readPref, UI_PREF_KEYS } from '../lib/smsPrefs';
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import * as XLSX from 'xlsx';
 import { CHANNEL_LABELS, STATUS_LABELS, summarizeLogs } from '../lib/logStatus';
 import { filterLogsForStats } from '../lib/reportStats';
 import type { CampaignFlags } from '../lib/repo/mapping';
 import { MessageLog } from '../types';
-import { AreaChart, Search, CheckCircle2, AlertCircle, Eye, Phone, Trash2, SlidersHorizontal, ArrowLeft, Send, Sparkles, MessageSquare, Smartphone, ExternalLink } from 'lucide-react';
+import { AreaChart, Search, CheckCircle2, AlertCircle, Eye, Phone, Trash2, SlidersHorizontal, ArrowLeft, Send, Sparkles, MessageSquare, Smartphone, ExternalLink, FileSpreadsheet } from 'lucide-react';
 import { SECRET_MASK } from '../lib/template';
+import { backupFilename } from '../lib/backup';
+import { buildReportsWorkbook } from '../lib/reportExport';
 
 interface ReportsPanelProps {
   logs: MessageLog[];
@@ -23,6 +26,8 @@ interface ReportsPanelProps {
   isRefreshingStatuses?: boolean;
   onResendFailed?: (logs: MessageLog[]) => void;
   onToggleCampaignFlag?: (id: string, flags: { isTest?: boolean; archived?: boolean }) => void;
+  /** Campaign id → title, including immediate-send campaigns. */
+  campaignTitles?: Record<string, string>;
 }
 
 const STATUS_BADGE_CLASS: Record<string, string> = {
@@ -45,24 +50,41 @@ export default function ReportsPanel({
   onRefreshStatuses,
   isRefreshingStatuses,
   onResendFailed,
+  campaignTitles = {},
 }: ReportsPanelProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<'all' | 'sent' | 'delivered' | 'failed'>('all');
+  const [selectedCampaignId, setSelectedCampaignId] = useState<string>('all');
   const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
 
   const visibleLogs = filterLogsForStats(logs, campaignFlags, { includeTest });
+  const campaignOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const opts: { id: string; title: string }[] = [];
+    for (const l of visibleLogs) {
+      const id = String(l.campaignId ?? '').trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      opts.push({ id, title: campaignTitles[id] || (l.isTest ? 'حملة تجريبية' : 'إرسال فوري') });
+    }
+    return opts;
+  }, [visibleLogs, campaignTitles]);
 
-  // Compute metrics from visible (non-test by default) logs
-  const totalCount = visibleLogs.length;
+  const campaignFilteredLogs = selectedCampaignId === 'all'
+    ? visibleLogs
+    : visibleLogs.filter(l => l.campaignId === selectedCampaignId);
+
+  // Compute metrics from the campaign-filtered, non-test-by-default view (status filter is table-only).
+  const totalCount = campaignFilteredLogs.length;
   // Honest metrics: 'sent' = handed to the gateway/app (no delivery receipt), never counted as failed
-  const summary = summarizeLogs(visibleLogs);
+  const summary = summarizeLogs(campaignFilteredLogs);
   const sentCount = summary.successful;
   const deliveredCount = summary.delivered;
   const failedCount = summary.failed;
   const deliveryRate = summary.successRate ?? 0;
 
   // Filter logs for display
-  const dispLogs = visibleLogs.filter(log => {
+  const dispLogs = campaignFilteredLogs.filter(log => {
     const matchSearch = 
       log.studentName.toLowerCase().includes(searchTerm.toLowerCase()) ||
       log.parentName.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -76,7 +98,13 @@ export default function ReportsPanel({
     return matchSearch && matchStatus;
   });
 
-  const selectedLog = visibleLogs.find(l => l.id === selectedLogId) || logs.find(l => l.id === selectedLogId);
+  const selectedLog = campaignFilteredLogs.find(l => l.id === selectedLogId) || logs.find(l => l.id === selectedLogId);
+
+  const handleExportExcel = () => {
+    if (!dispLogs.length) return;
+    const wb = buildReportsWorkbook(dispLogs, { campaignTitles });
+    XLSX.writeFile(wb, backupFilename(new Date(), 'reports', 'xlsx'));
+  };
 
   const formatRawTime = (isoString: string) => {
     try {
@@ -111,11 +139,11 @@ export default function ReportsPanel({
             إظهار التجريبي والمخفي
           </label>
         )}
-        {onResendFailed && visibleLogs.some(l => l.status === 'failed') && (
+        {onResendFailed && campaignFilteredLogs.some(l => l.status === 'failed') && (
           <button
             type="button"
             id="btn-resend-failed"
-            onClick={() => onResendFailed(visibleLogs.filter(l => l.status === 'failed'))}
+            onClick={() => onResendFailed(campaignFilteredLogs.filter(l => l.status === 'failed'))}
             className="text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-3 py-1.5 rounded-lg transition shrink-0 self-start md:self-center"
           >
             إعادة إرسال الفاشلة فقط
@@ -247,6 +275,30 @@ export default function ReportsPanel({
                 );
               })}
             </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <select
+              id="reports-campaign-filter"
+              value={selectedCampaignId}
+              onChange={e => { setSelectedCampaignId(e.target.value); setSelectedLogId(null); }}
+              className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs max-w-full sm:max-w-xs"
+            >
+              <option value="all">كل الحملات</option>
+              {campaignOptions.map(o => (
+                <option key={o.id} value={o.id}>{o.title}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              id="btn-export-reports"
+              disabled={!dispLogs.length}
+              onClick={handleExportExcel}
+              className="text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg transition shrink-0 disabled:opacity-40 flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              تصدير العرض الحالي إلى Excel ({dispLogs.length})
+            </button>
           </div>
 
           {/* Logs table representation */}

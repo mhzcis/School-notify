@@ -4,6 +4,7 @@
  * RLS-protected `school_notify` schema, and the in-memory fake is used by tests.
  */
 import type { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../../types';
+import type { RecipientGroup } from '../recipientGroups';
 
 export interface AppData {
   students: Student[];
@@ -13,6 +14,8 @@ export interface AppData {
   logs: MessageLog[];
   /** Flags for every campaign row including immediate ones (meta JSON; no migration). */
   campaignFlags?: import('./mapping').CampaignFlags[];
+  /** Named recipient groups (national IDs only). */
+  groups?: RecipientGroup[];
 }
 
 export type ProgressFn = (done: number, total: number) => void;
@@ -50,6 +53,10 @@ export interface SchoolRepository {
    * when the stored gateway state is already final or newer. Returns ids actually updated.
    */
   updateGatewayStates(updates: GatewayLogUpdate[]): Promise<string[]>;
+  /** Named recipient groups. Cloud-backed when the pending migration is applied; otherwise local. */
+  listRecipientGroups(): Promise<RecipientGroup[]>;
+  upsertRecipientGroups(groups: RecipientGroup[]): Promise<void>;
+  deleteRecipientGroup(id: string): Promise<void>;
 }
 
 export interface GatewayLogUpdate {

@@ -20,12 +20,16 @@ export function writeUseCloudGateway(v: boolean): void {
 /**
  * Other non-sensitive UI preferences. They use the `sn_` prefix so that the old browser-only
  * `resal_*` keys are never read (and never deleted) by the cloud version of the app.
+ *
+ * Never store SMSGate credentials or Moodle passwords in these keys (those live in server
+ * secrets / a later Phase 3 owner-only table).
  */
 export const UI_PREF_KEYS = {
   schoolName: 'sn_school_name',
   phonePrefix: 'sn_phone_prefix',
   smsSegmentPrice: 'sn_sms_segment_price',
   smsBatchDelaySec: 'sn_sms_batch_delay_sec',
+  lastBackupAt: 'sn_last_backup_at',
 } as const;
 
 export function readPref(key: string, fallback = ''): string {
@@ -53,4 +57,60 @@ export function readBatchDelaySec(): number {
 export function writeBatchDelaySec(sec: number): void {
   const n = Number.isFinite(sec) ? Math.min(300, Math.max(0, Math.round(sec))) : 2;
   writePref(UI_PREF_KEYS.smsBatchDelaySec, String(n));
+}
+
+/** Non-secret prefs included in a v2 backup (and restored after a browser wipe). */
+export interface BackupPrefs {
+  schoolName?: string;
+  phonePrefix?: string;
+  smsSegmentPrice?: string;
+  smsBatchDelaySec?: string;
+  useCloudGateway?: boolean;
+}
+
+export function collectBackupPrefs(): BackupPrefs {
+  return {
+    schoolName: readPref(UI_PREF_KEYS.schoolName),
+    phonePrefix: readPref(UI_PREF_KEYS.phonePrefix),
+    smsSegmentPrice: readPref(UI_PREF_KEYS.smsSegmentPrice),
+    smsBatchDelaySec: readPref(UI_PREF_KEYS.smsBatchDelaySec),
+    useCloudGateway: readUseCloudGateway(),
+  };
+}
+
+/** Applies non-secret prefs from a backup. Missing keys are left unchanged. */
+export function applyBackupPrefs(prefs: BackupPrefs | undefined | null): void {
+  if (!prefs || typeof prefs !== 'object') return;
+  if (typeof prefs.schoolName === 'string') writePref(UI_PREF_KEYS.schoolName, prefs.schoolName);
+  if (typeof prefs.phonePrefix === 'string') writePref(UI_PREF_KEYS.phonePrefix, prefs.phonePrefix);
+  if (typeof prefs.smsSegmentPrice === 'string') writePref(UI_PREF_KEYS.smsSegmentPrice, prefs.smsSegmentPrice);
+  if (typeof prefs.smsBatchDelaySec === 'string') writePref(UI_PREF_KEYS.smsBatchDelaySec, prefs.smsBatchDelaySec);
+  if (typeof prefs.useCloudGateway === 'boolean') writeUseCloudGateway(prefs.useCloudGateway);
+}
+
+export const BACKUP_REMINDER_DAYS = 7;
+
+export function markBackupDownloaded(now: Date = new Date()): void {
+  writePref(UI_PREF_KEYS.lastBackupAt, now.toISOString());
+}
+
+export function lastBackupAt(): Date | null {
+  const raw = readPref(UI_PREF_KEYS.lastBackupAt);
+  if (!raw) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Days since the last downloaded backup, or null if none was recorded. */
+export function daysSinceLastBackup(now: Date = new Date()): number | null {
+  const last = lastBackupAt();
+  if (!last) return null;
+  return Math.floor((now.getTime() - last.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+/** True when no backup was downloaded, or the last one is older than `days`. */
+export function isBackupReminderDue(now: Date = new Date(), days: number = BACKUP_REMINDER_DAYS): boolean {
+  const last = lastBackupAt();
+  if (!last) return true;
+  return now.getTime() - last.getTime() >= days * 24 * 60 * 60 * 1000;
 }
