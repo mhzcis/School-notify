@@ -60,6 +60,10 @@ export interface SendOptions {
   signal?: AbortSignal;
   /** Injected for tests. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** Called right before a batch request leaves the browser (persist "in flight" here). */
+  onBatchStart?: (ids: string[]) => void;
+  /** Checked before every batch; true stops like an abort (remaining items get 'aborted'). */
+  shouldStop?: () => boolean;
 }
 
 /** setTimeout-based sleep that resolves early when aborted. */
@@ -97,7 +101,7 @@ export async function sendViaProxy(
   const batches = chunk(items, size);
   for (let b = 0; b < batches.length; b++) {
     if (b > 0 && delayMs) await wait(delayMs, opts.signal);
-    if (opts.signal?.aborted) {
+    if (opts.signal?.aborted || opts.shouldStop?.()) {
       results.push(...batches.slice(b).flat().map(i => ({ id: i.id, ok: false, error: 'aborted' })));
       onProgress?.([...results]);
       return { results, aborted: true };
@@ -108,6 +112,7 @@ export async function sendViaProxy(
     let res: ProxyResponse;
     if ('error' in v) res = { ok: false, error: v.error };
     else {
+      opts.onBatchStart?.(batch.map(i => i.id));
       try {
         res = await invoke(body);
       } catch {
