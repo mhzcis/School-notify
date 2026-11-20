@@ -20,6 +20,7 @@ import TemplatesManager from './components/TemplatesManager';
 import Scheduler from './components/Scheduler';
 import ReportsPanel from './components/ReportsPanel';
 import SmsGatewaySettings, { GatewayStatus } from './components/SmsGatewaySettings';
+import HelpPage from './components/HelpPage';
 import BackupPanel from './components/BackupPanel';
 import MoodleTools from './components/MoodleTools';
 import { RepoError, SchoolRepository, repoErrorMessage } from './lib/repo/types';
@@ -53,7 +54,8 @@ import {
   LogOut,
   Loader2,
   RefreshCw,
-  GraduationCap
+  GraduationCap,
+  HelpCircle
 } from 'lucide-react';
 
 export interface AppProps {
@@ -73,7 +75,7 @@ const SEEDED_KEY = (uid: string) => `sn_default_templates_seeded:${uid}`;
 export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway, invokeSms = invokeSmsFunction }: AppProps) {
   // Navigation / UI States
   const [composerPrefill, setComposerPrefill] = useState<ComposerPrefill | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'compose' | 'importer' | 'moodle' | 'templates' | 'scheduler' | 'reports' | 'sms-config' | 'backup'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'compose' | 'importer' | 'moodle' | 'templates' | 'scheduler' | 'reports' | 'sms-config' | 'backup' | 'help'>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
 
@@ -596,7 +598,8 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
     { id: 'scheduler', label: 'الحملات والمواعيد مجدولة', icon: Clock },
     { id: 'reports', label: 'تقارير التسليم الفورية', icon: AreaChart },
     { id: 'sms-config', label: 'تهيئة بث رسائل SMS', icon: SlidersHorizontal },
-    { id: 'backup', label: 'النسخ الاحتياطي والاستعادة', icon: DatabaseBackup }
+    { id: 'backup', label: 'النسخ الاحتياطي والاستعادة', icon: DatabaseBackup },
+    { id: 'help', label: 'دليل الاستخدام', icon: HelpCircle }
   ] as const;
 
   return (
@@ -957,6 +960,8 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               onRestored={loadAll}
             />
           )}
+
+          {activeTab === 'help' && <HelpPage />}
 
           {activeTab === 'reports' && (
             <ReportsPanel

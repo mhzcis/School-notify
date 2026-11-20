@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readComposeFilter, writeComposeFilter } from '../lib/lastFilter';
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { PLACEHOLDERS, missingMoodleFields, templateUsesCredentials } from '../lib/template';
@@ -153,9 +154,9 @@ export default function MessageComposer({
     setActivePrefillTitle(null);
   };
   // Target filtering states
-  const [targetType, setTargetType] = useState<'all' | 'grade' | 'section' | 'custom'>('all');
-  const [selectedGrade, setSelectedGrade] = useState<string>('');
-  const [selectedSection, setSelectedSection] = useState<string>('');
+  const [targetType, setTargetType] = useState<'all' | 'grade' | 'section' | 'custom'>(() => readComposeFilter().targetType);
+  const [selectedGrade, setSelectedGrade] = useState<string>(() => readComposeFilter().grade);
+  const [selectedSection, setSelectedSection] = useState<string>(() => readComposeFilter().section);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
@@ -530,18 +531,23 @@ export default function MessageComposer({
   const distinctGrades = Array.from(new Set(students.map(s => s.grade))).sort();
   const distinctSections = Array.from(new Set(students.map(s => s.section))).sort();
 
-  // Set default grade/section if empty
+  // Set default grade/section if empty, or if a remembered one no longer exists
   useEffect(() => {
-    if (distinctGrades.length > 0 && !selectedGrade) {
+    if (distinctGrades.length > 0 && (!selectedGrade || !distinctGrades.includes(selectedGrade))) {
       setSelectedGrade(distinctGrades[0]);
     }
   }, [distinctGrades, selectedGrade]);
 
   useEffect(() => {
-    if (distinctSections.length > 0 && !selectedSection) {
+    if (distinctSections.length > 0 && (!selectedSection || !distinctSections.includes(selectedSection))) {
       setSelectedSection(distinctSections[0]);
     }
   }, [distinctSections, selectedSection]);
+
+  // Remember the last filter (never the selected students).
+  useEffect(() => {
+    writeComposeFilter({ targetType, grade: selectedGrade, section: selectedSection });
+  }, [targetType, selectedGrade, selectedSection]);
 
   // Compute base matching pool according to filters
   useEffect(() => {
