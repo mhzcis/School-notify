@@ -297,7 +297,13 @@ export function proxyErrorMessage(code: string | undefined): string {
       return 'رفضت بوابة SMSGate الرسالة.';
     case 'client_not_configured':
       return 'التطبيق غير مهيأ للاتصال بالخادم.';
+    case 'allow_check_failed':
+      return 'تعذر التحقق من صلاحية الحساب على الخادم. حاول مرة أخرى بعد قليل.';
+    case 'method_not_allowed':
+      return 'طلب غير مدعوم من خادم الإرسال.';
     default:
-      return 'تعذر إرسال الرسالة عبر البوابة.';
+      return code
+        ? `تعذر إرسال الرسالة عبر البوابة (رمز الخطأ: ${code}).`
+        : 'تعذر إرسال الرسالة عبر البوابة.';
   }
 }

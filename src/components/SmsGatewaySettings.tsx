@@ -34,7 +34,7 @@ export default function SmsGatewaySettings({ schoolName, gatewayStatus, onRefres
   const [useCloud, setUseCloud] = useState<boolean>(() => readUseCloudGateway());
   // The test phone is intentionally kept in memory only (never persisted).
   const [testPhone, setTestPhone] = useState('');
-  const [testState, setTestState] = useState<{ loading: boolean; ok?: boolean; text?: string }>({ loading: false });
+  const [testState, setTestState] = useState<{ loading: boolean; ok?: boolean; tone?: 'info'; text?: string }>({ loading: false });
   const [delaySec, setDelaySec] = useState<number>(() => readBatchDelaySec());
 
   const testText = `رسالة تجريبية من نظام الإشعارات المدرسية - ${schoolName}`;
@@ -46,46 +46,71 @@ export default function SmsGatewaySettings({ schoolName, gatewayStatus, onRefres
   };
 
   const [lastTest, setLastTest] = useState<{ id: string; state: GatewayState } | null>(null);
+  /** Inline confirmation step (replaces window.confirm, which some browsers suppress silently). */
+  const [confirming, setConfirming] = useState(false);
+
   const handleRefreshTest = async () => {
     if (!lastTest) return;
     setTestState(prev => ({ ...prev, loading: true }));
-    const st = (await fetchStatusesOnce(invoke, new Map([[lastTest.id, lastTest.state]]))).get(lastTest.id)!;
-    setLastTest({ id: st.id, state: st.state });
-    setTestState({ loading: false, ok: st.state !== 'Failed' && st.state !== 'Cancelled', text: `الحالة: ${GATEWAY_STATE_LABELS[st.state]}${st.error ? `: ${st.error}` : ''}` });
+    try {
+      const st = (await fetchStatusesOnce(invoke, new Map([[lastTest.id, lastTest.state]]))).get(lastTest.id)!;
+      setLastTest({ id: st.id, state: st.state });
+      setTestState({ loading: false, ok: st.state !== 'Failed' && st.state !== 'Cancelled', text: `الحالة: ${GATEWAY_STATE_LABELS[st.state]}${st.error ? `: ${st.error}` : ''}` });
+    } catch {
+      setTestState({ loading: false, ok: false, text: 'تعذر تحديث حالة الرسالة التجريبية. حاول مرة أخرى.' });
+    }
   };
 
-  const handleTestSend = async () => {
+  /** Step 1: validate the number, then ask for an explicit inline confirmation. Nothing is sent here. */
+  const handleTestSend = () => {
     setLastTest(null);
     const check = checkPhone(testPhone);
     if (!check.valid) {
-      setTestState({ loading: false, ok: false, text: `رقم غير صالح: ${check.problem ? PHONE_PROBLEM_LABELS[check.problem] : ''}` });
+      setConfirming(false);
+      setTestState({ loading: false, ok: false, text: `رقم غير صالح: ${check.problem ? PHONE_PROBLEM_LABELS[check.problem] : ''}. لم تُرسل أي رسالة.` });
       return;
     }
-    if (!window.confirm(`سيتم إرسال رسالة تجريبية واحدة إلى رقم واحد (${seg.segments} جزء SMS). متابعة؟`)) return;
-    setTestState({ loading: true });
-    const { results, fatalError } = await sendViaProxy(invoke, [{ id: 'test', phone: testPhone, text: testText }]);
-    const r = results[0];
-    if (r?.ok) {
-      if (!r.gatewayMessageId) {
-        setTestState({ loading: false, ok: true, text: 'قبلت البوابة الرسالة التجريبية: 1 — الحالة غير متاحة (لم تُرجع البوابة رقم الرسالة).' });
+    setConfirming(true);
+    setTestState({ loading: false, tone: 'info', text: `سيتم إرسال رسالة تجريبية واحدة إلى رقم واحد (${seg.segments} جزء SMS). اضغط «تأكيد الإرسال» للمتابعة أو «إلغاء».` });
+  };
+
+  const cancelTestSend = () => {
+    setConfirming(false);
+    setTestState({ loading: false, tone: 'info', text: 'تم إلغاء الإرسال التجريبي. لم تُرسل أي رسالة.' });
+  };
+
+  /** Step 2: the teacher confirmed; send exactly one message and always report the outcome. */
+  const confirmTestSend = async () => {
+    if (!confirming || testState.loading) return;
+    setConfirming(false);
+    setTestState({ loading: true, tone: 'info', text: 'جاري إرسال الرسالة التجريبية إلى خادم الإرسال...' });
+    try {
+      const { results, fatalError } = await sendViaProxy(invoke, [{ id: 'test', phone: testPhone, text: testText }]);
+      const r = results[0];
+      if (r?.ok) {
+        if (!r.gatewayMessageId) {
+          setTestState({ loading: false, ok: true, text: 'قبلت البوابة الرسالة التجريبية: 1 — الحالة غير متاحة (لم تُرجع البوابة رقم الرسالة).' });
+        } else {
+          setTestState({ loading: true, ok: true, text: 'قبلت البوابة الرسالة التجريبية: 1 — جاري متابعة حالتها على الهاتف...' });
+          const map = await pollMessageStatus(invoke, [r.gatewayMessageId], {
+            timeoutMs: 5 * 60_000,
+            ...pollOptions,
+            onUpdate: m => setTestState({ loading: true, ok: true, text: `قبلت البوابة الرسالة التجريبية: 1 — الحالة: ${GATEWAY_STATE_LABELS[m.get(r.gatewayMessageId!)!.state]}` }),
+          });
+          const st = map.get(r.gatewayMessageId)!;
+          setLastTest({ id: st.id, state: st.state });
+          const c = countGatewayStates(map.values());
+          setTestState({
+            loading: false,
+            ok: st.state !== 'Failed' && st.state !== 'Cancelled',
+            text: `${gatewayCountsText(c)}. (${GATEWAY_STATE_LABELS[st.state]}${st.error ? `: ${st.error}` : ''})`,
+          });
+        }
       } else {
-        setTestState({ loading: true, ok: true, text: 'قبلت البوابة الرسالة التجريبية: 1 — جاري متابعة حالتها على الهاتف...' });
-        const map = await pollMessageStatus(invoke, [r.gatewayMessageId], {
-          timeoutMs: 5 * 60_000,
-          ...pollOptions,
-          onUpdate: m => setTestState({ loading: true, ok: true, text: `قبلت البوابة الرسالة التجريبية: 1 — الحالة: ${GATEWAY_STATE_LABELS[m.get(r.gatewayMessageId!)!.state]}` }),
-        });
-        const st = map.get(r.gatewayMessageId)!;
-        setLastTest({ id: st.id, state: st.state });
-        const c = countGatewayStates(map.values());
-        setTestState({
-          loading: false,
-          ok: st.state !== 'Failed' && st.state !== 'Cancelled',
-          text: `${gatewayCountsText(c)}. (${GATEWAY_STATE_LABELS[st.state]}${st.error ? `: ${st.error}` : ''})`,
-        });
+        setTestState({ loading: false, ok: false, text: proxyErrorMessage(fatalError || r?.error) });
       }
-    } else {
-      setTestState({ loading: false, ok: false, text: proxyErrorMessage(fatalError || r?.error) });
+    } catch {
+      setTestState({ loading: false, ok: false, text: 'حدث خطأ غير متوقع أثناء الإرسال التجريبي. تحقق من الاتصال ثم حاول مرة أخرى.' });
     }
     void onRefreshStatus();
   };
@@ -187,7 +212,7 @@ export default function SmsGatewaySettings({ schoolName, gatewayStatus, onRefres
             type="tel"
             dir="ltr"
             value={testPhone}
-            onChange={e => setTestPhone(e.target.value)}
+            onChange={e => { setTestPhone(e.target.value); setConfirming(false); }}
             placeholder="05XXXXXXXX"
             className="border border-slate-300 rounded-lg px-3 py-2 text-xs w-48"
             id="input-test-phone"
@@ -195,8 +220,8 @@ export default function SmsGatewaySettings({ schoolName, gatewayStatus, onRefres
           />
           <button
             type="button"
-            onClick={() => void handleTestSend()}
-            disabled={testState.loading || !testPhone.trim()}
+            onClick={handleTestSend}
+            disabled={testState.loading || confirming || !testPhone.trim()}
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-xs font-bold rounded-lg flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed"
             id="btn-test-send"
           >
@@ -217,11 +242,36 @@ export default function SmsGatewaySettings({ schoolName, gatewayStatus, onRefres
         </div>
         {testState.text && (
           <div
-            className={`p-3 rounded-lg text-xs flex items-start gap-2 ${testState.ok ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}
+            className={`p-3 rounded-lg text-xs flex items-start gap-2 ${testState.tone === 'info' ? 'bg-slate-50 text-slate-700 border border-slate-200' : testState.ok ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}
             id="test-send-result"
+            role="status"
+            aria-live="polite"
+            data-state={testState.loading ? 'loading' : confirming ? 'confirm' : testState.tone === 'info' ? 'info' : testState.ok ? 'ok' : 'error'}
           >
-            {testState.ok ? <ShieldCheck className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
-            <span>{testState.text}</span>
+            {testState.loading ? <Loader2 className="w-4 h-4 shrink-0 animate-spin" /> : testState.tone === 'info' ? <Info className="w-4 h-4 shrink-0" /> : testState.ok ? <ShieldCheck className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
+            <div className="space-y-2">
+              <span>{testState.text}</span>
+              {confirming && (
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void confirmTestSend()}
+                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg cursor-pointer"
+                    id="btn-test-send-confirm"
+                  >
+                    تأكيد الإرسال
+                  </button>
+                  <button
+                    type="button"
+                    onClick={cancelTestSend}
+                    className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-lg cursor-pointer"
+                    id="btn-test-send-cancel"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </section>
