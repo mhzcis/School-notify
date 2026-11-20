@@ -1,16 +1,3 @@
--- NEEDS APPROVAL BEFORE APPLYING TO THE LIVE PROJECT.
--- Do not apply automatically. Take a cloud JSON backup first.
---
--- Additive only: creates school_notify.section_events (per-section quiz /
--- assignment windows: title, close time, launcher URL, duration, attempts).
--- Drops nothing and rewrites no existing rows. Stores no student PII and no
--- Moodle credentials.
---
--- The app degrades safely without this table (section windows fall back to
--- localStorage + the normal backup JSON file until the migration is applied).
---
--- RLS: owner = auth.uid() AND school_notify.is_allowed(). Anon has no access.
-
 create table if not exists school_notify.section_events (
   id uuid primary key default gen_random_uuid(),
   owner uuid not null,

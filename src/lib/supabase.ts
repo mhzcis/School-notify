@@ -16,6 +16,18 @@ export const SMS_FUNCTION_NAME = 'school-notify-sms';
 
 export const isSupabaseConfigured = (): boolean => !!SUPABASE_URL && !!SUPABASE_PUBLISHABLE_KEY;
 
+/** Auth session key includes the project host so a URL change starts a fresh login.
+ *  It never reads or deletes `resal_*` or `sn_*` keys. */
+export function authStorageKey(): string {
+  try {
+    if (!SUPABASE_URL) return 'school-notify-auth';
+    const host = new URL(SUPABASE_URL).host;
+    return host ? `school-notify-auth:${host}` : 'school-notify-auth';
+  } catch {
+    return 'school-notify-auth';
+  }
+}
+
 let client: SupabaseClient<any, any, any> | null = null;
 
 /** Lazily created singleton; null when the build has no Supabase configuration. */
@@ -28,7 +40,7 @@ export function getSupabase(): SupabaseClient<any, any, any> | null {
         persistSession: true,
         autoRefreshToken: true,
         detectSessionInUrl: false,
-        storageKey: 'school-notify-auth',
+        storageKey: authStorageKey(),
       },
     });
   }
