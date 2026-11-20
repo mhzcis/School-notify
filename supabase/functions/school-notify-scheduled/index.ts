@@ -9,7 +9,8 @@
 //   3. SCHEDULER_ENABLED secret exactly equal to "true" (missing/false = off).
 //   4. Owner row in school_notify.scheduler_settings with enabled = true
 //      (defaults false; only the teacher can turn it on after the migration).
-//   5. Campaign is due, not archived, not immediate, not in quiet hours
+//   5. Numbers on the owner's do-not-send list (suppressed_phones) are never sent to.
+//   6. Campaign is due, not archived, not immediate, not in quiet hours
 //      (22:00–07:00 Asia/Jerusalem) unless quietHoursOverride was stored.
 //
 // Idempotent: claims rows with FOR UPDATE SKIP LOCKED; skips phones already
@@ -21,6 +22,7 @@ import {
   alreadySentKeys,
   buildItems,
   DEFAULT_MAX_PER_RUN,
+  excludeSuppressed,
   remainingItems,
   resolveTargets,
   templateUsesCredentials,
@@ -192,7 +194,16 @@ Deno.serve(async (req: Request) => {
       phone: String(r.phone ?? ''),
       status: String(r.status ?? ''),
     }));
-    const items = remainingItems(buildItems(targets, phoneTarget, template), alreadySentKeys(prior)).slice(0, Math.max(1, Math.min(maxPerRun, 200)));
+    // Do-not-send list: fail closed (keep the campaign pending) if it cannot be read.
+    const supRes = await fetch(`${url}/rest/v1/suppressed_phones?owner=eq.${owner}&select=phone&limit=10000`, { headers });
+    if (!supRes.ok) {
+      await supRes.body?.cancel();
+      await patchCampaign(url, headers, campaignId, 'pending', { schedulerSkipReason: 'suppression_load_failed' });
+      continue;
+    }
+    const suppressed = new Set(((await supRes.json()) as any[] ?? []).map(r => String(r.phone ?? '')));
+    const allItems = excludeSuppressed(buildItems(targets, phoneTarget, template), suppressed);
+    const items = remainingItems(allItems, alreadySentKeys(prior)).slice(0, Math.max(1, Math.min(maxPerRun, 200)));
 
     if (!items.length) {
       await patchCampaign(url, headers, campaignId, 'completed', { schedulerSkipReason: 'already_sent' });
@@ -249,7 +260,7 @@ Deno.serve(async (req: Request) => {
       if (!ins.ok) await ins.body?.cancel();
     }
 
-    const stillLeft = remainingItems(buildItems(targets, phoneTarget, template), alreadySentKeys(prior.concat(
+    const stillLeft = remainingItems(allItems, alreadySentKeys(prior.concat(
       items.map((item, i) => ({ studentId: item.studentId, phone: item.phoneLocal, status: results[i]?.ok ? 'sent' : 'failed' })),
     )));
     if (stillLeft.length) {

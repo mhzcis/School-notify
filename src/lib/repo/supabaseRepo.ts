@@ -2,6 +2,7 @@
  * Supabase implementation of SchoolRepository (schema `school_notify`, RLS-protected).
  * Every row carries owner = the signed-in user id; RLS enforces owner = auth.uid() AND is_allowed().
  */
+import { parseSuppressed, type SuppressedPhone } from '../suppression';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../../types';
 import { isNetworkError } from '../../auth/authService';
@@ -724,6 +725,72 @@ export class SupabaseSchoolRepository implements SchoolRepository {
         this.schedulerMode = 'unavailable';
         throw new RepoError('other', 'scheduler_unavailable');
       }
+      throw toRepoError(err);
+    }
+  }
+
+  private suppressionMode: 'unknown' | 'cloud' | 'unavailable' = 'unknown';
+
+  async listSuppressedPhones(): Promise<{ available: boolean; rows: SuppressedPhone[] }> {
+    if (this.suppressionMode === 'unavailable') return { available: false, rows: [] };
+    try {
+      const { data, error } = await this.sb
+        .from('suppressed_phones')
+        .select('phone,reason,created_at')
+        .order('created_at', { ascending: true });
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.suppressionMode = 'unavailable';
+          return { available: false, rows: [] };
+        }
+        throw toRepoError(error);
+      }
+      this.suppressionMode = 'cloud';
+      return {
+        available: true,
+        rows: (data ?? []).map((r: any) => ({ phone: String(r.phone ?? ''), reason: String(r.reason ?? ''), createdAt: r.created_at ?? undefined })),
+      };
+    } catch (err) {
+      if (err instanceof RepoError) throw err;
+      if (isMissingRelationError(err)) {
+        this.suppressionMode = 'unavailable';
+        return { available: false, rows: [] };
+      }
+      throw toRepoError(err);
+    }
+  }
+
+  async upsertSuppressedPhone(entry: SuppressedPhone): Promise<void> {
+    const p = parseSuppressed(entry.phone, entry.reason);
+    if (!p.ok) throw new RepoError('other', 'invalid_phone');
+    if (this.suppressionMode === 'unavailable') throw new RepoError('other', 'suppression_unavailable');
+    try {
+      const { error } = await this.sb
+        .from('suppressed_phones')
+        .upsert({ owner: this.owner, phone: p.entry.phone, reason: p.entry.reason }, { onConflict: 'owner,phone' });
+      if (error) {
+        if (isMissingRelationError(error)) {
+          this.suppressionMode = 'unavailable';
+          throw new RepoError('other', 'suppression_unavailable');
+        }
+        throw toRepoError(error);
+      }
+      this.suppressionMode = 'cloud';
+    } catch (err) {
+      if (err instanceof RepoError) throw err;
+      throw toRepoError(err);
+    }
+  }
+
+  async deleteSuppressedPhone(phone: string): Promise<void> {
+    const p = parseSuppressed(phone, '');
+    if (!p.ok) return;
+    if (this.suppressionMode === 'unavailable') throw new RepoError('other', 'suppression_unavailable');
+    try {
+      const { error } = await this.sb.from('suppressed_phones').delete().eq('owner', this.owner).eq('phone', p.entry.phone);
+      if (error) throw toRepoError(error);
+    } catch (err) {
+      if (err instanceof RepoError) throw err;
       throw toRepoError(err);
     }
   }

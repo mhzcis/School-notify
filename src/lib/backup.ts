@@ -16,6 +16,7 @@ import { FORBIDDEN_STUDENT_KEYS, isUuid, newId, stripForbiddenStudentFields } fr
 import { applyBackupPrefs, collectBackupPrefs, markBackupDownloaded, type BackupPrefs } from './smsPrefs';
 import { parseGroups } from './recipientGroups';
 import { parseSectionEvents } from './sectionEvents';
+import { parseSuppressedList } from './suppression';
 import { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../types';
 
 export const BACKUP_FORMAT = 'school-notify-cloud-backup';
@@ -39,6 +40,7 @@ export interface BackupSummary {
   logs: number;
   groups: number;
   sectionEvents: number;
+  suppressed: number;
   hasPrefs: boolean;
   secretsIncluded: boolean;
   exportedAt: string;
@@ -84,6 +86,7 @@ export function createBackup(data: AppData, opts: { now?: Date; prefs?: BackupPr
       logs: data.logs,
       groups: parseGroups(data.groups ?? []),
       sectionEvents: parseSectionEvents(data.sectionEvents ?? []),
+      suppressed: parseSuppressedList(data.suppressed ?? []),
     },
   };
 }
@@ -143,6 +146,7 @@ export function validateBackup(text: string): ValidationResult {
       logs: d.logs as MessageLog[],
       groups,
       sectionEvents: parseSectionEvents(d.sectionEvents ?? []),
+      suppressed: parseSuppressedList(d.suppressed ?? []),
     },
   };
   return {
@@ -155,6 +159,7 @@ export function validateBackup(text: string): ValidationResult {
       logs: d.logs.length,
       groups: groups.length,
       sectionEvents: backup.data.sectionEvents?.length ?? 0,
+      suppressed: backup.data.suppressed?.length ?? 0,
       hasPrefs: !!backup.prefs,
       secretsIncluded: false,
       exportedAt: backup.exportedAt,
@@ -203,6 +208,15 @@ export async function applyBackup(
   if (sectionEvents.length) {
     onProgress?.('sectionEvents');
     await repo.upsertSectionEvents(sectionEvents);
+  }
+  const suppressed = parseSuppressedList(d.suppressed ?? []);
+  if (suppressed.length) {
+    onProgress?.('suppressed');
+    const current = await repo.listSuppressedPhones();
+    if (current.available) {
+      const have = new Set(current.rows.map(r => r.phone));
+      for (const s of suppressed) if (!have.has(s.phone)) await repo.upsertSuppressedPhone(s);
+    }
   }
   if (backup.prefs) applyBackupPrefs(backup.prefs);
 }

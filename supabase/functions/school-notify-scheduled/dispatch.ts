@@ -174,6 +174,12 @@ export function buildItems(
   return items;
 }
 
+/** Drops items whose local phone is on the do-not-send list. */
+export function excludeSuppressed(items: DispatchItem[], suppressed: Set<string>): DispatchItem[] {
+  if (!suppressed.size) return items;
+  return items.filter(i => !suppressed.has(i.phoneLocal));
+}
+
 export function alreadySentKeys(rows: Array<{ studentId: string; phone: string; status: string }>): Set<string> {
   const keys = new Set<string>();
   for (const r of rows) {

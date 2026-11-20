@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Student, MessageTemplate, ScheduledMessage, MessageLog, SchoolStats } from './types';
 import { DEFAULT_TEMPLATES } from './data/mockStudents';
 
@@ -21,6 +21,8 @@ import Scheduler from './components/Scheduler';
 import ReportsPanel from './components/ReportsPanel';
 import SmsGatewaySettings, { GatewayStatus } from './components/SmsGatewaySettings';
 import HelpPage from './components/HelpPage';
+import SuppressionListPanel from './components/SuppressionListPanel';
+import { suppressionSet, type SuppressedPhone } from './lib/suppression';
 import { nextTheme, readTheme, THEME_LABELS, writeTheme, type ThemePref } from './lib/theme';
 import BackupPanel from './components/BackupPanel';
 import MoodleTools from './components/MoodleTools';
@@ -79,6 +81,8 @@ const SEEDED_KEY = (uid: string) => `sn_default_templates_seeded:${uid}`;
 export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway, invokeSms = invokeSmsFunction }: AppProps) {
   // Navigation / UI States
   const [composerPrefill, setComposerPrefill] = useState<ComposerPrefill | null>(null);
+  const [suppression, setSuppression] = useState<{ available: boolean; rows: SuppressedPhone[] }>({ available: false, rows: [] });
+  const suppressedSet = useMemo(() => suppressionSet(suppression.rows), [suppression.rows]);
   const [themePref, setThemePref] = useState<ThemePref>(() => readTheme());
   const [activeTab, setActiveTab] = useState<'overview' | 'compose' | 'importer' | 'moodle' | 'templates' | 'scheduler' | 'reports' | 'sms-config' | 'backup' | 'help'>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -178,6 +182,12 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
         setSchedulerSettings(await repo.getSchedulerSettings());
       } catch {
         setSchedulerSettings(defaultSchedulerSettings());
+      }
+      try {
+        const sup = await repo.listSuppressedPhones();
+        setSuppression(sup);
+      } catch {
+        setSuppression({ available: false, rows: [] });
       }
       setSchoolName(readPref(UI_PREF_KEYS.schoolName) || 'مدرسة المنارة الثانوية الشاملة');
       setLoadState('ready');
@@ -878,6 +888,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               onSaveGroup={handleSaveGroup}
               onDeleteGroup={handleDeleteGroup}
               sectionEvents={sectionEvents}
+              suppressedPhones={suppressedSet}
               loadMoodleCredentials={async () => {
                 const r = await repo.listMoodleCredentials();
                 setCredentialsAvailable(r.available);
@@ -888,7 +899,21 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
           )}
 
           {activeTab === 'sms-config' && (
-            <SmsGatewaySettings schoolName={schoolName} gatewayStatus={gatewayStatus} onRefreshStatus={refreshGatewayStatus} />
+            <div className="space-y-6">
+              <SmsGatewaySettings schoolName={schoolName} gatewayStatus={gatewayStatus} onRefreshStatus={refreshGatewayStatus} />
+              <SuppressionListPanel
+                available={suppression.available}
+                rows={suppression.rows}
+                onAdd={async entry => {
+                  await repo.upsertSuppressedPhone(entry);
+                  setSuppression(await repo.listSuppressedPhones());
+                }}
+                onRemove={async phone => {
+                  await repo.deleteSuppressedPhone(phone);
+                  setSuppression(await repo.listSuppressedPhones());
+                }}
+              />
+            </div>
           )}
 
           {activeTab === 'importer' && (
@@ -971,7 +996,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
 
           {activeTab === 'backup' && (
             <BackupPanel
-              data={{ students, templates, campaigns: scheduledMessages, logs, groups, sectionEvents }}
+              data={{ students, templates, campaigns: scheduledMessages, logs, groups, sectionEvents, suppressed: suppression.rows }}
               repo={repo}
               onRestored={loadAll}
             />

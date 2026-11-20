@@ -8,6 +8,7 @@ import type { MoodleCredential } from '../moodleCredentials';
 import type { RecipientGroup } from '../recipientGroups';
 import type { SectionEvent } from '../sectionEvents';
 import type { SchedulerSettings } from '../scheduledSend';
+import type { SuppressedPhone } from '../suppression';
 
 export interface AppData {
   students: Student[];
@@ -21,6 +22,8 @@ export interface AppData {
   groups?: RecipientGroup[];
   /** Per-section quiz/assignment windows (no credentials). */
   sectionEvents?: SectionEvent[];
+  /** Do-not-send list (local phones + reason). */
+  suppressed?: SuppressedPhone[];
 }
 
 export type ProgressFn = (done: number, total: number) => void;
@@ -75,6 +78,10 @@ export interface SchoolRepository {
   /** Auto-send kill switch. available=false when the pending table is not applied (treated as off). */
   getSchedulerSettings(): Promise<SchedulerSettings>;
   upsertSchedulerSettings(patch: { enabled: boolean; maxPerRun?: number }): Promise<void>;
+  /** Do-not-send list. available=false when the table is not applied (the UI disables editing). */
+  listSuppressedPhones(): Promise<{ available: boolean; rows: SuppressedPhone[] }>;
+  upsertSuppressedPhone(entry: SuppressedPhone): Promise<void>;
+  deleteSuppressedPhone(phone: string): Promise<void>;
 }
 
 export interface GatewayLogUpdate {
