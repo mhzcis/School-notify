@@ -17,6 +17,7 @@ import { applyBackupPrefs, collectBackupPrefs, markBackupDownloaded, type Backup
 import { parseGroups } from './recipientGroups';
 import { parseSectionEvents } from './sectionEvents';
 import { parseSuppressedList } from './suppression';
+import { encryptBackupText } from './backupCrypto';
 import { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../types';
 
 export const BACKUP_FORMAT = 'school-notify-cloud-backup';
@@ -262,4 +263,18 @@ export function downloadDataBackup(data: AppData, opts: { label?: string; prefs?
 /** True if a JSON string appears to contain Moodle credentials or SMSGate secrets. */
 export function backupTextLooksSensitive(text: string): boolean {
   return /moodlePassword"\s*:\s*"[^"]+"|moodle_password"\s*:\s*"[^"]+"|كلمة_مرور_مودل|SMSGATE_|smsgate password|webhook.signing|encryption.passphrase/i.test(text);
+}
+
+/** Downloads a password-protected backup (AES-GCM, key from PBKDF2). The password is not stored. */
+export async function downloadEncryptedBackup(
+  data: AppData,
+  password: string,
+  opts: { prefs?: BackupPrefs; now?: Date; iterations?: number } = {},
+): Promise<BackupFile> {
+  const now = opts.now ?? new Date();
+  const backup = createBackup(data, { prefs: opts.prefs, now });
+  const enc = await encryptBackupText(JSON.stringify(backup), password, { now, iterations: opts.iterations });
+  downloadJson(enc, backupFilename(now, 'backup-encrypted'));
+  markBackupDownloaded(now);
+  return backup;
 }
