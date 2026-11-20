@@ -226,3 +226,16 @@ describe('log status from gateway state', () => {
     expect(old.gatewayState).toBeUndefined();
   });
 });
+
+describe('gateway 401 vs 403', () => {
+  it('reports 401 as gateway_auth_failed and 403 as gateway_forbidden', async () => {
+    const mk = (status: number) => (async () => new Response('', { status })) as any;
+    const a = await sendOne({ id: 't1', phone: '+970590000001', text: 'x' }, 'Basic x', mk(401));
+    const b = await sendOne({ id: 't2', phone: '+970590000001', text: 'x' }, 'Basic x', mk(403));
+    expect(a.error).toBe('gateway_auth_failed');
+    expect(b.error).toBe('gateway_forbidden');
+    expect(a.authFailed && b.authFailed).toBe(true);
+    const s = await statusMany(['abc'], 'Basic x', mk(403));
+    expect(s[0].error).toBe('gateway_forbidden');
+  });
+});

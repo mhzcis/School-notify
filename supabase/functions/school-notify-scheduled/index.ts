@@ -211,14 +211,14 @@ Deno.serve(async (req: Request) => {
     }
 
     const results: ItemResult[] = [];
-    let authFailed = false;
+    let authFailed: string | null = null;
     for (const item of items) {
       if (authFailed) {
-        results.push({ id: item.studentId, ok: false, error: 'gateway_auth_failed' });
+        results.push({ id: item.studentId, ok: false, error: authFailed });
         continue;
       }
       const r = await sendOne({ id: item.studentId.slice(0, 64), phone: item.phoneE164, text: item.content }, auth, fetch, passphrase);
-      if (r.authFailed) authFailed = true;
+      if (r.authFailed) authFailed = r.error ?? 'gateway_auth_failed';
       results.push(r);
     }
 

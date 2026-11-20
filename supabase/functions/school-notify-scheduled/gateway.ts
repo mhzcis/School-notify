@@ -67,7 +67,8 @@ export async function sendOne(
       });
       if (res.status === 401 || res.status === 403) {
         await res.body?.cancel();
-        return { id: item.id, ok: false, error: 'gateway_auth_failed', authFailed: true };
+        // 401 = wrong username/password; 403 = credentials accepted but access refused.
+        return { id: item.id, ok: false, error: res.status === 403 ? 'gateway_forbidden' : 'gateway_auth_failed', authFailed: true };
       }
       if (!res.ok) {
         await res.body?.cancel();
@@ -111,7 +112,7 @@ export async function statusOne(id: string, auth: string, f: FetchLike): Promise
       const res = await f(SMSGATE_STATUS_URL(id), { method: 'GET', headers: { Authorization: auth }, signal });
       if (res.status === 401 || res.status === 403) {
         await res.body?.cancel();
-        return { id, state: 'Unknown' as const, error: 'gateway_auth_failed', authFailed: true };
+        return { id, state: 'Unknown' as const, error: res.status === 403 ? 'gateway_forbidden' : 'gateway_auth_failed', authFailed: true };
       }
       if (res.status === 404) {
         await res.body?.cancel();
@@ -136,14 +137,14 @@ export async function statusOne(id: string, auth: string, f: FetchLike): Promise
 
 export async function statusMany(ids: string[], auth: string, f: FetchLike): Promise<StatusResult[]> {
   const out: StatusResult[] = [];
-  let authFailed = false;
+  let authFailed: string | null = null;
   for (const id of ids) {
     if (authFailed) {
-      out.push({ id, state: 'Unknown', error: 'gateway_auth_failed' });
+      out.push({ id, state: 'Unknown', error: authFailed });
       continue;
     }
     const r = await statusOne(id, auth, f);
-    if (r.authFailed) authFailed = true;
+    if (r.authFailed) authFailed = r.error ?? 'gateway_auth_failed';
     out.push(r.error ? { id: r.id, state: r.state, error: r.error } : { id: r.id, state: r.state });
   }
   return out;
