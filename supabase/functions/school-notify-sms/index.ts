@@ -119,14 +119,14 @@ Deno.serve(async (req: Request) => {
     return json(200, { ok: true, statuses }, origin);
   }
   const results: ItemResult[] = [];
-  let authFailed = false;
+  let authFailed: string | null = null;
   for (const item of v.value.messages) {
     if (authFailed) {
-      results.push({ id: item.id, ok: false, error: 'gateway_auth_failed' });
+      results.push({ id: item.id, ok: false, error: authFailed });
       continue;
     }
     const r = await sendOne(item, auth, fetch, passphrase);
-    if (r.authFailed) authFailed = true;
+    if (r.authFailed) authFailed = r.error ?? 'gateway_auth_failed';
     results.push({ id: r.id, ok: r.ok, error: r.error, gatewayMessageId: r.gatewayMessageId });
   }
   // Counts only — no phones, bodies or credentials in logs.

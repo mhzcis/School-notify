@@ -173,7 +173,7 @@ export async function refreshStatusesOnce(
     }
     for (const st of (res.statuses ?? []) as GatewayStatus[]) {
       if (!map.has(st.id)) continue;
-      if (st.state === 'Unknown' && st.error === 'gateway_auth_failed') stop = true;
+      if (st.state === 'Unknown' && (st.error === 'gateway_auth_failed' || st.error === 'gateway_forbidden')) stop = true;
       // Unknown (temporary lookup error) never overwrites; older states never downgrade.
       if (st.state === 'Unknown') continue;
       const cur = map.get(st.id)!;
@@ -288,6 +288,8 @@ export function proxyErrorMessage(code: string | undefined): string {
       return 'رقم الجوال غير صالح.';
     case 'gateway_auth_failed':
       return 'بيانات SMSGate المحفوظة في الخادم غير صحيحة (رفضت البوابة المصادقة).';
+    case 'gateway_forbidden':
+      return 'رفضت بوابة SMSGate الطلب (403): البيانات مقبولة لكن الوصول ممنوع. تحقق من حساب SMSGate وصلاحياته.';
     case 'gateway_timeout':
     case 'gateway_unreachable':
       return 'تعذر الاتصال ببوابة SMSGate. حاول لاحقاً.';
