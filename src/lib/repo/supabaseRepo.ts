@@ -37,7 +37,7 @@ import {
   writeLocalGroups,
   type RecipientGroup,
 } from '../recipientGroups';
-import type { MoodleCredential } from '../moodleCredentials';
+import { defaultUpsertFields, type CredentialUpsertFields, type MoodleCredential } from '../moodleCredentials';
 import {
   parseSectionEvents,
   readLocalSectionEvents,
@@ -451,21 +451,23 @@ export class SupabaseSchoolRepository implements SchoolRepository {
   // ----- Moodle credentials (no localStorage fallback) -----
   private credentialsMode: 'unknown' | 'cloud' | 'unavailable' = 'unknown';
 
-  private credToRow(c: MoodleCredential) {
+  private credToRow(c: MoodleCredential, fields: CredentialUpsertFields) {
     return {
       owner: this.owner,
       national_id: c.nationalId,
       moodle_username: c.moodleUsername ?? '',
-      moodle_password: c.moodlePassword ?? '',
+      ...(fields.password ? { moodle_password: c.moodlePassword ?? '' } : {}),
+      ...(fields.defaultPassword ? { default_password: c.moodleDefaultPassword ?? '' } : {}),
       updated_at: new Date().toISOString(),
     };
   }
 
-  private rowToCred(r: { national_id: string; moodle_username?: string; moodle_password?: string }): MoodleCredential {
+  private rowToCred(r: { national_id: string; moodle_username?: string; moodle_password?: string; default_password?: string }): MoodleCredential {
     return {
       nationalId: String(r.national_id),
       moodleUsername: String(r.moodle_username ?? ''),
       moodlePassword: String(r.moodle_password ?? ''),
+      moodleDefaultPassword: String(r.default_password ?? ''),
     };
   }
 
@@ -474,7 +476,7 @@ export class SupabaseSchoolRepository implements SchoolRepository {
     try {
       const { data, error } = await this.sb
         .from('student_moodle_credentials')
-        .select('national_id,moodle_username,moodle_password')
+        .select('national_id,moodle_username,moodle_password,default_password')
         .order('national_id', { ascending: true });
       if (error) {
         if (isMissingRelationError(error)) {
@@ -527,7 +529,7 @@ export class SupabaseSchoolRepository implements SchoolRepository {
     }
   }
 
-  async upsertMoodleCredentials(rows: MoodleCredential[]): Promise<number> {
+  async upsertMoodleCredentials(rows: MoodleCredential[], fields: CredentialUpsertFields = defaultUpsertFields(rows)): Promise<number> {
     const unique = new Map<string, MoodleCredential>();
     for (const r of rows) {
       const id = String(r.nationalId ?? '').trim();
@@ -540,7 +542,7 @@ export class SupabaseSchoolRepository implements SchoolRepository {
     try {
       const { error } = await this.sb
         .from('student_moodle_credentials')
-        .upsert(list.map(c => this.credToRow(c)), { onConflict: 'owner,national_id' });
+        .upsert(list.map(c => this.credToRow(c, fields)), { onConflict: 'owner,national_id' });
       if (error) {
         if (isMissingRelationError(error)) {
           this.credentialsMode = 'unavailable';

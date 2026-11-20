@@ -52,7 +52,7 @@ export interface StudentRow {
 const STUDENT_COLUMNS = new Set(['id', 'name', 'parentName', 'phone', 'grade']);
 
 /** Must never be written to students.extra (credentials belong in student_moodle_credentials). */
-export const FORBIDDEN_STUDENT_KEYS = ['notes', 'moodlePassword', 'moodleUsername'] as const;
+export const FORBIDDEN_STUDENT_KEYS = ['notes', 'moodlePassword', 'moodleUsername', 'moodleDefaultPassword'] as const;
 
 export function stripForbiddenStudentFields<T extends Record<string, any>>(obj: T): T {
   const out = { ...obj };

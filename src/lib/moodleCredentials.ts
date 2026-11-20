@@ -11,6 +11,8 @@ export interface MoodleCredential {
   nationalId: string;
   moodleUsername: string;
   moodlePassword: string;
+  /** Moodle default (reset) password. Undefined = the import had no such column (keep the stored value). */
+  moodleDefaultPassword?: string;
 }
 
 export interface CredentialsParseResult {
@@ -20,6 +22,15 @@ export interface CredentialsParseResult {
   /** Data rows skipped because they had no valid national ID. */
   skippedNoId: number;
   headers: string[];
+  /** Which secret columns the sheet actually had (absent columns never overwrite stored values). */
+  hasPasswordColumn: boolean;
+  hasDefaultPasswordColumn: boolean;
+}
+
+/** Which credential columns an upsert should write. Omitted columns keep their stored value. */
+export interface CredentialUpsertFields {
+  password: boolean;
+  defaultPassword: boolean;
 }
 
 const ID_HEADERS = new Set([
@@ -28,6 +39,10 @@ const ID_HEADERS = new Set([
 ]);
 const USER_HEADERS = new Set([
   'moodle username', 'اسم مستخدم مودل', 'اسم المستخدم', 'username', 'user name',
+]);
+const DEFAULT_PASS_HEADERS = new Set([
+  'default password', 'moodle default password', 'كلمه المرور الافتراضيه', 'كلمه مرور افتراضيه',
+  'كلمه مرور مودل الافتراضيه', 'كلمه المرور الاصليه',
 ]);
 const PASS_HEADERS = new Set([
   'moodle password', 'كلمه مرور مودل', 'كلمة مرور مودل', 'كلمه المرور', 'كلمة المرور',
@@ -50,6 +65,7 @@ export function parseCredentialsTable(headers: string[], records: Record<string,
   const idH = first(headers, ID_HEADERS);
   const userH = first(headers, USER_HEADERS);
   const passH = first(headers, PASS_HEADERS);
+  const defH = first(headers, DEFAULT_PASS_HEADERS);
   const seen = new Map<string, MoodleCredential>();
   const dup = new Set<string>();
   let skippedNoId = 0;
@@ -70,6 +86,7 @@ export function parseCredentialsTable(headers: string[], records: Record<string,
         ? id
         : (usernameIsIdColumn ? id : username) || id,
       moodlePassword: clean(passH ? rec[passH] : ''),
+      ...(defH ? { moodleDefaultPassword: clean(rec[defH]) } : {}),
     };
     // Prefer a dedicated username when present and not just the ID.
     const dedicatedUser = first(headers, new Set([...USER_HEADERS].filter(x => !ID_HEADERS.has(x) || x.includes('مودل') || x.includes('moodle'))));
@@ -83,6 +100,8 @@ export function parseCredentialsTable(headers: string[], records: Record<string,
     duplicateIds: [...dup],
     skippedNoId,
     headers,
+    hasPasswordColumn: Boolean(passH),
+    hasDefaultPasswordColumn: Boolean(defH),
   };
 }
 
@@ -91,7 +110,7 @@ export function parseCredentialsFile(input: { text?: string; buffer?: ArrayBuffe
     ? XLSX.read(input.buffer, { type: 'array' })
     : XLSX.read((input.text || '').replace(/^\uFEFF/, ''), { type: 'string' });
   const sheet = data.Sheets[data.SheetNames[0] ?? ''];
-  if (!sheet) return { rows: [], duplicateIds: [], skippedNoId: 0, headers: [] };
+  if (!sheet) return { rows: [], duplicateIds: [], skippedNoId: 0, headers: [], hasPasswordColumn: false, hasDefaultPasswordColumn: false };
   const aoa = XLSX.utils.sheet_to_json<Array<string | number | null>>(sheet, { header: 1, raw: false, defval: '' });
   const headers = ((aoa[0] ?? []) as Array<string | number | null>).map(c => clean(c));
   while (headers.length && !headers[headers.length - 1]) headers.pop();
@@ -121,14 +140,19 @@ export function credentialsByNationalId(list: MoodleCredential[]): Map<string, M
   return map;
 }
 
-export function attachCredentials<T extends { id: string; idNumber?: string; moodleUsername?: string; moodlePassword?: string }>(
+export function attachCredentials<T extends { id: string; idNumber?: string; moodleUsername?: string; moodlePassword?: string; moodleDefaultPassword?: string }>(
   student: T,
   creds: Map<string, MoodleCredential>,
 ): T {
   const keys = [student.id, student.idNumber].map(v => toAsciiDigits(String(v ?? '')).trim()).filter(Boolean);
   for (const k of keys) {
     const c = creds.get(k);
-    if (c) return { ...student, moodleUsername: c.moodleUsername, moodlePassword: c.moodlePassword };
+    if (c) return { ...student, moodleUsername: c.moodleUsername, moodlePassword: c.moodlePassword, moodleDefaultPassword: c.moodleDefaultPassword ?? '' };
   }
   return student;
+}
+
+/** Default fields for an upsert: write the Moodle password, and the default password only when provided. */
+export function defaultUpsertFields(rows: MoodleCredential[]): CredentialUpsertFields {
+  return { password: true, defaultPassword: rows.some(r => r.moodleDefaultPassword !== undefined) };
 }

@@ -959,8 +959,8 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
                   reportError(err);
                 }
               }}
-              onImportCredentials={async (rows) => {
-                const n = await repo.upsertMoodleCredentials(rows);
+              onImportCredentials={async (rows, fields) => {
+                const n = await repo.upsertMoodleCredentials(rows, fields);
                 const listed = await repo.listMoodleCredentials();
                 setCredentialsAvailable(listed.available);
                 setCredentialsCount(listed.rows.length);

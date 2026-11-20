@@ -262,7 +262,7 @@ export function downloadDataBackup(data: AppData, opts: { label?: string; prefs?
 
 /** True if a JSON string appears to contain Moodle credentials or SMSGate secrets. */
 export function backupTextLooksSensitive(text: string): boolean {
-  return /moodlePassword"\s*:\s*"[^"]+"|moodle_password"\s*:\s*"[^"]+"|كلمة_مرور_مودل|SMSGATE_|smsgate password|webhook.signing|encryption.passphrase/i.test(text);
+  return /moodlePassword"\s*:\s*"[^"]+"|moodle_password"\s*:\s*"[^"]+"|moodleDefaultPassword"\s*:\s*"[^"]+"|default_password"\s*:\s*"[^"]+"|كلمة_مرور_مودل|SMSGATE_|smsgate password|webhook.signing|encryption.passphrase/i.test(text);
 }
 
 /** Downloads a password-protected backup (AES-GCM, key from PBKDF2). The password is not stored. */

@@ -59,6 +59,7 @@ const IGNORED_HEADERS = new Set(
     'ملاحظات أو مستحقات', 'ملاحظات', 'المستحقات', 'مستحقات',
     'اسم المستخدم', 'اسم مستخدم', 'اسم المستخدم مودل', 'اسم مستخدم مودل', 'Username', 'User Name', 'Moodle Username', 'moodle_username',
     'كلمة المرور', 'كلمة مرور', 'كلمة المرور مودل', 'كلمة مرور مودل', 'Password', 'Moodle Password', 'moodle_password',
+    'كلمة المرور الافتراضية', 'كلمة مرور افتراضية', 'Default Password', 'default_password',
   ])
 );
 

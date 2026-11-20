@@ -40,6 +40,8 @@ export interface Student {
   moodleUsername?: string; // اسم مستخدم مودل الافتراضي
   /** كلمة مرور مودل — حساسة، تُملأ وقت الإرسال فقط من جدول student_moodle_credentials ولا تُحفظ في students. */
   moodlePassword?: string;
+  /** كلمة مرور مودل الافتراضية (بعد إعادة التعيين) — حساسة، من جدول student_moodle_credentials فقط ولا تُحفظ في students. */
+  moodleDefaultPassword?: string;
 }
 
 export interface MessageTemplate {
