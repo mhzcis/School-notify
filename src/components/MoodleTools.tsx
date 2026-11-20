@@ -8,7 +8,7 @@ import { BookOpen, ClipboardCopy, GraduationCap, Save, Upload } from 'lucide-rea
 import type { Student } from '../types';
 import type { MessageTemplate } from '../types';
 import { parseMoodleFile, type MoodleExportKind, type ParsedMoodleFile } from '../lib/moodleCsv';
-import { countBySection, matchMoodleRows, resolveAmbiguous, sectionLabel, type MoodleMatchResult } from '../lib/moodleMatch';
+import { countBySection, matchMoodleRows, resolveAmbiguous, sectionLabel, type MoodleMatchResult, type SectionCounts } from '../lib/moodleMatch';
 import {
   maskCredentialPassword,
   parseCredentialsFile,
@@ -18,6 +18,7 @@ import { BUILTIN_MOODLE_TEMPLATES, NEVER_LOGGED_IN_TEMPLATE } from '../lib/moodl
 import { buildSectionEvent, buildQuizLauncherUrl, eventLabel, type SectionEvent } from '../lib/sectionEvents';
 import { buildWhatsAppBlurb, DEFAULT_WA_SIGNATURE } from '../lib/whatsappBlurb';
 import { newId } from '../lib/repo/mapping';
+import SectionCalendar from './SectionCalendar';
 import { repoErrorMessage } from '../lib/repo/types';
 
 export interface MoodlePreparePayload {
@@ -48,6 +49,22 @@ const TARGET_LABEL: Record<TargetKind, string> = {
   draft: 'مسودة (لم يُضغط تسليم)',
   notAttempted: 'لم يحاول الاختبار',
 };
+
+const DASH_COLUMNS: TargetKind[] = ['never', 'notSince', 'notSubmitted', 'draft', 'notAttempted'];
+
+function sectionList(c: SectionCounts, k: TargetKind): string[] {
+  return k === 'never' ? c.neverLoggedIn
+    : k === 'notSince' ? c.notSince
+    : k === 'notSubmitted' ? c.notSubmitted
+    : k === 'draft' ? c.draft
+    : c.notAttempted;
+}
+
+function templateFor(k: TargetKind) {
+  return k === 'never' || k === 'notSince'
+    ? NEVER_LOGGED_IN_TEMPLATE
+    : k === 'notAttempted' ? BUILTIN_MOODLE_TEMPLATES[1] : BUILTIN_MOODLE_TEMPLATES[2];
+}
 
 function readFile(file: File): Promise<{ text?: string; buffer?: ArrayBuffer; filename: string }> {
   const name = file.name || '';
@@ -273,6 +290,49 @@ export default function MoodleTools(props: MoodleToolsProps) {
             </div>
           ))}
 
+          {counts.length > 0 && (
+            <div className="overflow-x-auto" id="moodle-section-dashboard">
+              <div className="text-xs font-bold text-slate-700 mb-1">لوحة الشعب (من الملف الحالي)</div>
+              <table className="w-full text-xs text-right border border-slate-100">
+                <thead className="bg-slate-50 text-slate-600">
+                  <tr>
+                    <th className="p-2">الشعبة</th>
+                    {DASH_COLUMNS.map(c => <th key={c} className="p-2">{c === 'notSince' ? `لم يدخل منذ ${notSinceDays} يوم` : TARGET_LABEL[c]}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {counts.map(c => (
+                    <tr key={c.label} className="border-t border-slate-100" data-section={c.label}>
+                      <td className="p-2 font-bold">{c.label}</td>
+                      {DASH_COLUMNS.map(k => {
+                        const ids = sectionList(c, k);
+                        return (
+                          <td key={k} className="p-2">
+                            {ids.length === 0 ? <span className="text-slate-300 font-mono">0</span> : (
+                              <button
+                                type="button"
+                                className="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 font-bold font-mono cursor-pointer"
+                                title="جهّز حملة لهذه الشعبة وهذه الفئة"
+                                data-prepare={`${c.label}|${k}`}
+                                onClick={() => onPrepareCampaign({
+                                  title: `${TARGET_LABEL[k]} — ${c.label}`,
+                                  content: templateFor(k).content,
+                                  studentIds: ids,
+                                })}
+                              >
+                                {ids.length} · جهّز
+                              </button>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
           <div className="grid gap-3 md:grid-cols-4">
             <label className="text-xs font-bold text-slate-600">
               الفئة
@@ -339,6 +399,8 @@ export default function MoodleTools(props: MoodleToolsProps) {
           ))}
         </div>
       </div>
+
+      <SectionCalendar events={sectionEvents} students={students} onPrepareCampaign={onPrepareCampaign} />
 
       <div className="bg-white rounded-2xl border border-slate-100 p-6 shadow-xs space-y-3" id="section-events-editor">
         <h3 className="font-bold text-slate-800">مواعيد الاختبارات والواجبات لكل شعبة</h3>
