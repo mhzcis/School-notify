@@ -4,7 +4,8 @@
  */
 
 import { readPref, UI_PREF_KEYS } from '../lib/smsPrefs';
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { readDashboardFilter, writeDashboardFilter, validOption } from '../lib/lastFilter';
 import { SchoolStats, Student } from '../types';
 import { checkPhone, isSendablePhone, PHONE_PROBLEM_LABELS } from '../lib/phone';
 import SecretText from './SecretText';
@@ -65,11 +66,16 @@ export default function DashboardOverview({
 }: DashboardOverviewProps) {
 
   // Local state for searching & filtering the student directory
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = useState(() => readDashboardFilter().search);
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [addingStudent, setAddingStudent] = useState(false);
-  const [selectedGradeFilter, setSelectedGradeFilter] = useState('all');
-  const [selectedSectionFilter, setSelectedSectionFilter] = useState('all');
+  const [selectedGradeFilter, setSelectedGradeFilter] = useState(() => readDashboardFilter().grade);
+  const [selectedSectionFilter, setSelectedSectionFilter] = useState(() => readDashboardFilter().section);
+
+  // Remember the last filter (non-sensitive sn_* pref).
+  useEffect(() => {
+    writeDashboardFilter({ grade: selectedGradeFilter, section: selectedSectionFilter, search: searchTerm });
+  }, [selectedGradeFilter, selectedSectionFilter, searchTerm]);
 
   // Deletion operation selector
   const [showDeletionConsole, setShowDeletionConsole] = useState(false);
@@ -126,6 +132,15 @@ export default function DashboardOverview({
       )
     ).filter(Boolean);
   }, [students, selectedGradeFilter]);
+
+  // Drop a remembered grade/section that no longer exists in the student list.
+  useEffect(() => {
+    if (students.length === 0) return;
+    const g = validOption(selectedGradeFilter, gradesList, 'all', true);
+    if (g !== selectedGradeFilter) { setSelectedGradeFilter(g); setSelectedSectionFilter('all'); return; }
+    const s = validOption(selectedSectionFilter, sectionsListForSelectedGrade, 'all', true);
+    if (s !== selectedSectionFilter) setSelectedSectionFilter(s);
+  }, [students.length, gradesList, sectionsListForSelectedGrade, selectedGradeFilter, selectedSectionFilter]);
 
   // Bulk grades list for deletion dropdowns
   const bulkGradesList = useMemo(() => {

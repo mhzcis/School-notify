@@ -30,6 +30,9 @@ export const UI_PREF_KEYS = {
   smsSegmentPrice: 'sn_sms_segment_price',
   smsBatchDelaySec: 'sn_sms_batch_delay_sec',
   lastBackupAt: 'sn_last_backup_at',
+  lastFilterCompose: 'sn_last_filter_compose',
+  lastFilterDashboard: 'sn_last_filter_dashboard',
+  theme: 'sn_theme',
 } as const;
 
 export function readPref(key: string, fallback = ''): string {
@@ -66,6 +69,9 @@ export interface BackupPrefs {
   smsSegmentPrice?: string;
   smsBatchDelaySec?: string;
   useCloudGateway?: boolean;
+  lastFilterCompose?: string;
+  lastFilterDashboard?: string;
+  theme?: string;
 }
 
 export function collectBackupPrefs(): BackupPrefs {
@@ -75,6 +81,9 @@ export function collectBackupPrefs(): BackupPrefs {
     smsSegmentPrice: readPref(UI_PREF_KEYS.smsSegmentPrice),
     smsBatchDelaySec: readPref(UI_PREF_KEYS.smsBatchDelaySec),
     useCloudGateway: readUseCloudGateway(),
+    lastFilterCompose: readPref(UI_PREF_KEYS.lastFilterCompose),
+    lastFilterDashboard: readPref(UI_PREF_KEYS.lastFilterDashboard),
+    theme: readPref(UI_PREF_KEYS.theme),
   };
 }
 
@@ -86,6 +95,9 @@ export function applyBackupPrefs(prefs: BackupPrefs | undefined | null): void {
   if (typeof prefs.smsSegmentPrice === 'string') writePref(UI_PREF_KEYS.smsSegmentPrice, prefs.smsSegmentPrice);
   if (typeof prefs.smsBatchDelaySec === 'string') writePref(UI_PREF_KEYS.smsBatchDelaySec, prefs.smsBatchDelaySec);
   if (typeof prefs.useCloudGateway === 'boolean') writeUseCloudGateway(prefs.useCloudGateway);
+  if (typeof prefs.lastFilterCompose === 'string' && prefs.lastFilterCompose) writePref(UI_PREF_KEYS.lastFilterCompose, prefs.lastFilterCompose.slice(0, 1000));
+  if (typeof prefs.lastFilterDashboard === 'string' && prefs.lastFilterDashboard) writePref(UI_PREF_KEYS.lastFilterDashboard, prefs.lastFilterDashboard.slice(0, 1000));
+  if (prefs.theme === 'light' || prefs.theme === 'dark' || prefs.theme === 'system') writePref(UI_PREF_KEYS.theme, prefs.theme);
 }
 
 export const BACKUP_REMINDER_DAYS = 7;
