@@ -23,15 +23,18 @@ export const PLACEHOLDERS: PlaceholderDef[] = [
   { tag: '{{اسم_مستخدم_مودل}}', label: 'اسم مستخدم مودل (مرادف)' },
   { tag: '{{كلمة_المرور}}', label: 'كلمة مرور مودل (حساسة)', sensitive: true },
   { tag: '{{كلمة_مرور_مودل}}', label: 'كلمة مرور مودل (حساسة، مرادف)', sensitive: true },
+  { tag: '{{كلمة_المرور_الافتراضية}}', label: 'كلمة مرور مودل الافتراضية بعد إعادة التعيين (حساسة)', sensitive: true },
   { tag: '{{رابط_الاختبار}}', label: 'رابط فتح الاختبار للشعبة' },
   { tag: '{{موعد_الإغلاق}}', label: 'موعد إغلاق الاختبار أو الواجب' },
 ];
 
 /** Placeholder keys whose values are secrets (masked in previews, lists and stored logs). */
-export const SECRET_KEYS = ['كلمة_المرور', 'كلمة_مرور_مودل'];
+export const SECRET_KEYS = ['كلمة_المرور', 'كلمة_مرور_مودل', 'كلمة_المرور_الافتراضية'];
 export const SECRET_MASK = '••••••';
 
-const SECRET_PLACEHOLDER_RE = /{{\s*(?:كلمة_المرور|كلمة_مرور_مودل)\s*}}/;
+const SECRET_PLACEHOLDER_RE = /{{\s*(?:كلمة_المرور|كلمة_مرور_مودل|كلمة_المرور_الافتراضية)\s*}}/;
+const PASSWORD_PLACEHOLDER_RE = /{{\s*(?:كلمة_المرور|كلمة_مرور_مودل)\s*}}/;
+const DEFAULT_PASSWORD_PLACEHOLDER_RE = /{{\s*كلمة_المرور_الافتراضية\s*}}/;
 const USERNAME_PLACEHOLDER_RE = /{{\s*اسم_المستخدم\s*}}|{{\s*اسم_مستخدم_مودل\s*}}/;
 
 /** True when the template references a secret placeholder such as {{كلمة_المرور}} or {{كلمة_مرور_مودل}}. */
@@ -45,10 +48,14 @@ export function templateUsesCredentials(template: string): boolean {
 }
 
 /** Moodle placeholders used by the template that the student has no value for. */
-export function missingMoodleFields(template: string, student: Partial<Student>): Array<'moodleUsername' | 'moodlePassword'> {
-  const out: Array<'moodleUsername' | 'moodlePassword'> = [];
+export function missingMoodleFields(
+  template: string,
+  student: Partial<Student>,
+): Array<'moodleUsername' | 'moodlePassword' | 'moodleDefaultPassword'> {
+  const out: Array<'moodleUsername' | 'moodlePassword' | 'moodleDefaultPassword'> = [];
   if (USERNAME_PLACEHOLDER_RE.test(template || '') && !clean(student.moodleUsername)) out.push('moodleUsername');
-  if (templateUsesSecrets(template) && !clean(student.moodlePassword)) out.push('moodlePassword');
+  if (PASSWORD_PLACEHOLDER_RE.test(template || '') && !clean(student.moodlePassword)) out.push('moodlePassword');
+  if (DEFAULT_PASSWORD_PLACEHOLDER_RE.test(template || '') && !clean(student.moodleDefaultPassword)) out.push('moodleDefaultPassword');
   return out;
 }
 
@@ -113,6 +120,7 @@ export function renderTemplate(template: string, student: Partial<Student>, opti
     'اسم_مستخدم_مودل': clean(student.moodleUsername),
     'كلمة_المرور': options.maskSecrets && clean(student.moodlePassword) ? SECRET_MASK : clean(student.moodlePassword),
     'كلمة_مرور_مودل': options.maskSecrets && clean(student.moodlePassword) ? SECRET_MASK : clean(student.moodlePassword),
+    'كلمة_المرور_الافتراضية': options.maskSecrets && clean(student.moodleDefaultPassword) ? SECRET_MASK : clean(student.moodleDefaultPassword),
     'رابط_الاختبار': clean(options.quizUrl),
     'موعد_الإغلاق': clean(options.closeDate),
   };

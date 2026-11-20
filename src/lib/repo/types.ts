@@ -4,7 +4,7 @@
  * RLS-protected `school_notify` schema, and the in-memory fake is used by tests.
  */
 import type { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../../types';
-import type { MoodleCredential } from '../moodleCredentials';
+import type { CredentialUpsertFields, MoodleCredential } from '../moodleCredentials';
 import type { RecipientGroup } from '../recipientGroups';
 import type { SectionEvent } from '../sectionEvents';
 import type { SchedulerSettings } from '../scheduledSend';
@@ -70,7 +70,8 @@ export interface SchoolRepository {
    * table is not applied yet (the UI must disable import/save in that case).
    */
   listMoodleCredentials(): Promise<{ available: boolean; rows: MoodleCredential[] }>;
-  upsertMoodleCredentials(rows: MoodleCredential[]): Promise<number>;
+  /** `fields` chooses which secret columns are written; omitted columns keep their stored value. */
+  upsertMoodleCredentials(rows: MoodleCredential[], fields?: CredentialUpsertFields): Promise<number>;
   deleteMoodleCredential(nationalId: string): Promise<void>;
   listSectionEvents(): Promise<SectionEvent[]>;
   upsertSectionEvents(events: SectionEvent[]): Promise<void>;

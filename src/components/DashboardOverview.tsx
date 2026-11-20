@@ -845,10 +845,11 @@ export default function DashboardOverview({
 
                       {/* Moodle default credentials (password masked, shown on demand) */}
                       <td className="py-3 px-4 text-[11px]">
-                        {student.moodleUsername || student.moodlePassword ? (
+                        {student.moodleUsername || student.moodlePassword || student.moodleDefaultPassword ? (
                           <div className="space-y-0.5">
                             <div className="font-mono text-slate-700" dir="ltr">{student.moodleUsername || '—'}</div>
                             <SecretText value={student.moodlePassword} />
+                            {student.moodleDefaultPassword ? <SecretText value={student.moodleDefaultPassword} /> : null}
                           </div>
                         ) : (
                           <span className="text-slate-300">—</span>

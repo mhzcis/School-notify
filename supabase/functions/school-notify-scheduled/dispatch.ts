@@ -19,7 +19,7 @@ export function isQuietHours(at: Date = new Date(), timeZone: string = SCHEDULER
 }
 
 export function templateUsesSecrets(template: string): boolean {
-  return /{{\s*(?:كلمة_المرور|كلمة_مرور_مودل)\s*}}/.test(template || '');
+  return /{{\s*(?:كلمة_المرور|كلمة_مرور_مودل|كلمة_المرور_الافتراضية)\s*}}/.test(template || '');
 }
 
 export function templateUsesCredentials(template: string): boolean {
@@ -47,11 +47,13 @@ export interface RenderStudent {
   section?: string;
   moodleUsername?: string;
   moodlePassword?: string;
+  moodleDefaultPassword?: string;
 }
 
 export function renderTemplate(template: string, student: RenderStudent, opts: { maskSecrets?: boolean; quizUrl?: string; closeDate?: string; today?: Date } = {}): string {
   const fullName = clean(student.name).replace(/\s+/g, ' ');
   const pass = opts.maskSecrets && clean(student.moodlePassword) ? '••••••' : clean(student.moodlePassword);
+  const defPass = opts.maskSecrets && clean(student.moodleDefaultPassword) ? '••••••' : clean(student.moodleDefaultPassword);
   const today = (opts.today ?? new Date()).toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   const values: Record<string, string> = {
     'اسم_الطالب': fullName,
@@ -65,6 +67,7 @@ export function renderTemplate(template: string, student: RenderStudent, opts: {
     'اسم_مستخدم_مودل': clean(student.moodleUsername),
     'كلمة_المرور': pass,
     'كلمة_مرور_مودل': pass,
+    'كلمة_المرور_الافتراضية': defPass,
     'رابط_الاختبار': clean(opts.quizUrl),
     'موعد_الإغلاق': clean(opts.closeDate),
   };

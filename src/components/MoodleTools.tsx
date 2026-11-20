@@ -12,6 +12,7 @@ import { countBySection, matchMoodleRows, resolveAmbiguous, sectionLabel, type M
 import {
   maskCredentialPassword,
   parseCredentialsFile,
+  type CredentialUpsertFields,
   type CredentialsParseResult,
 } from '../lib/moodleCredentials';
 import { BUILTIN_MOODLE_TEMPLATES, NEVER_LOGGED_IN_TEMPLATE } from '../lib/moodleTemplates';
@@ -37,7 +38,7 @@ interface MoodleToolsProps {
   onAddTemplate?: (tmpl: Omit<MessageTemplate, 'id'>) => void;
   onSaveSectionEvent: (event: SectionEvent) => Promise<void> | void;
   onDeleteSectionEvent: (id: string) => Promise<void> | void;
-  onImportCredentials: (rows: CredentialsParseResult['rows']) => Promise<number>;
+  onImportCredentials: (rows: CredentialsParseResult['rows'], fields?: CredentialUpsertFields) => Promise<number>;
 }
 
 type TargetKind = 'never' | 'notSince' | 'notSubmitted' | 'draft' | 'notAttempted';
@@ -477,7 +478,8 @@ export default function MoodleTools(props: MoodleToolsProps) {
         <h3 className="font-bold text-amber-900">استيراد بيانات دخول مودل (مسار مخصص)</h3>
         <p className="text-xs text-amber-800">
           هذا الاستيراد منفصل تماماً عن استيراد الطلاب. البيانات تُحفظ في جدول خاص بك وحدك، ولا تدخل في النسخ الاحتياطي العادي ولا التقارير ولا سجل الطالب.
-          المطابقة برقم الهوية فقط. الإرسال الذي يستخدم {'{{كلمة_مرور_مودل}}'} يحتاج تأكيداً إضافياً.
+          المطابقة برقم الهوية فقط. الإرسال الذي يستخدم {'{{كلمة_مرور_مودل}}'} أو {'{{كلمة_المرور_الافتراضية}}'} يحتاج تأكيداً إضافياً.
+          يمكن إضافة عمود «كلمة المرور الافتراضية» لاستخدامه في قالب «تغيير كلمة المرور»؛ العمود غير الموجود في الملف لا يمسح القيمة المخزّنة.
         </p>
         {!credentialsAvailable && (
           <div className="text-xs bg-rose-50 border border-rose-200 text-rose-800 rounded-lg p-3" id="moodle-credentials-unavailable">
@@ -488,7 +490,7 @@ export default function MoodleTools(props: MoodleToolsProps) {
           <p className="text-xs text-slate-600">عدد السجلات المخزّنة حالياً: <strong id="moodle-credentials-count">{credentialsCount}</strong></p>
         )}
         <label className={`text-xs font-bold text-slate-600 block ${credentialsAvailable ? '' : 'opacity-50'}`}>
-          ملف بيانات الدخول (رقم الهوية، اسم المستخدم، كلمة المرور)
+          ملف بيانات الدخول (رقم الهوية، اسم المستخدم، كلمة المرور، كلمة المرور الافتراضية — اختياري)
           <input
             id="moodle-credentials-file"
             type="file"
@@ -513,9 +515,15 @@ export default function MoodleTools(props: MoodleToolsProps) {
         {credPreview && (
           <div className="text-xs space-y-2" id="moodle-credentials-preview">
             <p>سيتم حفظ ({credPreview.rows.length}) سجل{credPreview.duplicateIds.length ? `، مع استبدال (${credPreview.duplicateIds.length}) رقم مكرر` : ''}{credPreview.skippedNoId ? `، وتجاهل (${credPreview.skippedNoId}) صف بلا رقم هوية` : ''}.</p>
+            <p className="text-slate-600" id="moodle-credentials-columns">
+              الأعمدة التي ستُحدَّث: كلمة مرور مودل {credPreview.hasPasswordColumn ? '✓' : '✗ (تبقى المخزّنة كما هي)'} · كلمة المرور الافتراضية {credPreview.hasDefaultPasswordColumn ? '✓' : '✗ (تبقى المخزّنة كما هي)'}
+            </p>
             <ul className="bg-slate-50 border border-slate-100 rounded-lg p-2 max-h-32 overflow-auto font-mono">
               {credPreview.rows.slice(0, 8).map(r => (
-                <li key={r.nationalId}>{r.nationalId} · {r.moodleUsername || '—'} · {maskCredentialPassword(r.moodlePassword)}</li>
+                <li key={r.nationalId}>
+                  {r.nationalId} · {r.moodleUsername || '—'} · {credPreview.hasPasswordColumn ? maskCredentialPassword(r.moodlePassword) || '—' : '—'}
+                  {credPreview.hasDefaultPasswordColumn && <> · الافتراضية: {maskCredentialPassword(r.moodleDefaultPassword ?? '') || '—'}</>}
+                </li>
               ))}
             </ul>
             <label className="flex items-center gap-2 font-bold cursor-pointer">
@@ -531,7 +539,7 @@ export default function MoodleTools(props: MoodleToolsProps) {
                 if (!credPreview || !credConfirm) return;
                 setCredBusy(true);
                 try {
-                  const n = await onImportCredentials(credPreview.rows);
+                  const n = await onImportCredentials(credPreview.rows, { password: credPreview.hasPasswordColumn, defaultPassword: credPreview.hasDefaultPasswordColumn });
                   setCredMsg(`تم حفظ (${n}) سجل بيانات دخول.`);
                   setCredPreview(null);
                   setCredConfirm(false);

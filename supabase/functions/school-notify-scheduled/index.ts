@@ -159,7 +159,7 @@ Deno.serve(async (req: Request) => {
 
     if (templateUsesCredentials(template) && allowCreds) {
       const cr = await fetch(
-        `${url}/rest/v1/student_moodle_credentials?owner=eq.${owner}&select=national_id,moodle_username,moodle_password`,
+        `${url}/rest/v1/student_moodle_credentials?owner=eq.${owner}&select=national_id,moodle_username,moodle_password,default_password`,
         { headers },
       );
       if (cr.ok) {
@@ -167,7 +167,7 @@ Deno.serve(async (req: Request) => {
         const map = new Map((creds ?? []).map(c => [String(c.national_id), c]));
         students = students.map(s => {
           const c = map.get(s.nationalId);
-          return c ? { ...s, moodleUsername: c.moodle_username, moodlePassword: c.moodle_password } : s;
+          return c ? { ...s, moodleUsername: c.moodle_username, moodlePassword: c.moodle_password, moodleDefaultPassword: c.default_password ?? '' } : s;
         });
       } else {
         await cr.body?.cancel();

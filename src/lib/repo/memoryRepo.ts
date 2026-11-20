@@ -8,7 +8,7 @@ import type { MessageLog, MessageTemplate, ScheduledMessage, Student } from '../
 import type { StudentEditPatch } from '../studentEdit';
 import { chunk, dedupeStudents, mergeIncomingStudent, prepareLogs } from './mapping';
 import { AppData, ProgressFn, RepoError, SchoolRepository, UPSERT_CHUNK_SIZE, GatewayLogUpdate } from './types';
-import type { MoodleCredential } from '../moodleCredentials';
+import { defaultUpsertFields, type CredentialUpsertFields, type MoodleCredential } from '../moodleCredentials';
 import { parseGroups, type RecipientGroup } from '../recipientGroups';
 import { parseSectionEvents, type SectionEvent } from '../sectionEvents';
 import { DEFAULT_MAX_PER_RUN, defaultSchedulerSettings, type SchedulerSettings } from '../scheduledSend';
@@ -201,14 +201,20 @@ export class InMemorySchoolRepository implements SchoolRepository {
     return { available: true, rows: [...this.credentials.values()].map(c => ({ ...c })) };
   }
 
-  async upsertMoodleCredentials(rows: MoodleCredential[]): Promise<number> {
+  async upsertMoodleCredentials(rows: MoodleCredential[], fields: CredentialUpsertFields = defaultUpsertFields(rows)): Promise<number> {
     this.maybeFail();
     if (!this.credentialsAvailable) throw new RepoError('other', 'credentials_unavailable');
     let n = 0;
     for (const r of rows) {
       const id = String(r.nationalId ?? '').trim();
       if (id.length < 4) continue;
-      this.credentials.set(id, { nationalId: id, moodleUsername: r.moodleUsername ?? '', moodlePassword: r.moodlePassword ?? '' });
+      const prev = this.credentials.get(id);
+      this.credentials.set(id, {
+        nationalId: id,
+        moodleUsername: r.moodleUsername ?? '',
+        moodlePassword: fields.password ? r.moodlePassword ?? '' : prev?.moodlePassword ?? '',
+        moodleDefaultPassword: fields.defaultPassword ? r.moodleDefaultPassword ?? '' : prev?.moodleDefaultPassword ?? '',
+      });
       n += 1;
     }
     return n;
