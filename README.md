@@ -109,24 +109,24 @@ Arabic notice. Phone numbers, message bodies and credentials are never logged.
 The manual WhatsApp/SMS queue (one-by-one, opened on the teacher's device) still works without the
 gateway.
 
-## Scheduled sending (server-side, off by default)
+## Scheduled sending (server-side)
 
-Campaigns can still be reviewed and sent from the browser. Automatic server-side sending is
-implemented but **does not send anything until it is explicitly enabled**. The schema already
-lives in `supabase/migrations/20261119225557_school_notify_scheduled_send.sql` and is applied
-on the dedicated project (`scheduler_settings` defaults to `enabled = false`; quiet hours are
-22:00–07:00 Asia/Jerusalem). Remaining enablement steps:
+Campaigns can still be reviewed and sent from the browser. Scheduled campaigns are sent by the
+Edge Function `school-notify-scheduled` (`verify_jwt = false`), called every 5 minutes by
+pg_cron + pg_net (`supabase/migrations/20261120011600_school_notify_scheduler_cron.sql`).
+The cron job reads the function URL and the `X-Scheduler-Secret` value from Supabase **Vault**
+(`school_notify_scheduler_url`, `school_notify_scheduler_secret`); no secret is in this repo.
 
-1. Confirm the Edge Function `school-notify-scheduled` (`verify_jwt = false`) is deployed with
-   the existing `SMSGATE_*` secrets plus a `SCHEDULER_CRON_SECRET`.
-2. Set the function secret `SCHEDULER_ENABLED` to the exact value `true`. Any other value (or a
-   missing secret) makes the function return without sending. Leave this unset to keep
-   automatic sending off.
-3. Create a cron job (pg_cron + pg_net, or another trusted scheduler) that POSTs to the function
-   with header `X-Scheduler-Secret`. The cron SQL in the migration file is commented out and must
-   not be run with a secret pasted into a script.
-4. In the app (جدولة), type «تفعيل» and turn the per-account switch on. The switch is disabled
-   until the settings table exists, and it can be turned off at any time.
+A message is only sent when **all** of these are true:
+
+1. The function secret `SCHEDULER_CRON_SECRET` equals the Vault value (otherwise 401).
+2. The function secret `SCHEDULER_ENABLED` is exactly `true` (global kill switch).
+3. The owner's switch in the app (جدولة, `scheduler_settings.enabled`) is on.
+4. The campaign is pending, due, not archived, and it is not 22:00–07:00 Asia/Jerusalem
+   (unless `quietHoursOverride` was stored when scheduling).
+
+To stop everything at once: set `SCHEDULER_ENABLED` to anything other than `true`, or run
+`select cron.unschedule('school-notify-scheduled-send');`.
 
 Due campaigns are claimed with `FOR UPDATE SKIP LOCKED`, already-logged phones are skipped
 (failed may be retried), and each run is capped by `max_per_run` (default 50). Templates that
