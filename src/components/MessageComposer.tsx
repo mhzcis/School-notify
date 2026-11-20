@@ -16,7 +16,12 @@ import { duplicateWarningCount, findDuplicateSends, isQuietHours } from '../lib/
 import SecretText from './SecretText';
 import StudentEditDialog from './StudentEditDialog';
 import type { StudentEditPatch } from '../lib/studentEdit';
-import { buildDispatchItems, EXCLUSION_LABELS } from '../lib/recipients';
+import { buildDispatchItems, EXCLUSION_LABELS, type DispatchItem, type DispatchRender } from '../lib/recipients';
+import {
+  applyResults, applySkips, clearJob, createJob, jobCounts, jobHasRemaining, jobNeedsAttention, markInflight, PAUSE_ON_ITEM_ERRORS,
+  PAUSE_REASON_LABELS, planResume, readJob, recoverAfterReload, SKIP_REASON_LABELS, writeJob,
+  type BulkSendJob, type PauseReason, type ResumePlan,
+} from '../lib/bulkSendJob';
 import { matchNames } from '../lib/nameMatching';
 import { segmentInfo } from '../lib/sms';
 import ConfirmSendDialog from './ConfirmSendDialog';
@@ -836,6 +841,220 @@ export default function MessageComposer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefill]);
 
+  // ----- Durable bulk send through the cloud gateway (pause / resume) -----
+  const [pendingJob, setPendingJob] = useState<BulkSendJob | null>(() => {
+    const stored = readJob();
+    if (!stored) return null;
+    const recovered = recoverAfterReload(stored);
+    if (!jobNeedsAttention(recovered)) {
+      clearJob();
+      return null;
+    }
+    if (recovered !== stored) writeJob(recovered);
+    return recovered;
+  });
+  const [resumeState, setResumeState] = useState<null | { job: BulkSendJob; plan: ResumePlan; missingMoodle: number }>(null);
+  const [resumeBusy, setResumeBusy] = useState(false);
+
+  const runGatewayJob = (startJob: BulkSendJob, keyed: Array<{ key: string; item: DispatchItem }>, quietOverride: boolean) => {
+    let job: BulkSendJob = { ...startJob, status: 'running', pauseReason: undefined, lastError: undefined };
+    const save = (j: BulkSendJob) => { job = j; writeJob(j); };
+    save(job);
+    setPendingJob(null);
+    setSilentProgress({
+      current: 0,
+      total: keyed.length,
+      studentName: keyed[0]?.item.studentName || '',
+      stage: 'sending',
+      successCount: 0,
+      failedCount: 0,
+      statusText: 'جاري إرسال الرسائل عبر خادم الإرسال الآمن...',
+      results: []
+    });
+    setIsSilentBroadcastActive(true);
+
+    (async () => {
+      const byKey = new Map(keyed.map(k => [k.key, k.item]));
+      const toRow = (r: ProxyItemResult) => {
+        const item = byKey.get(r.id)!;
+        return {
+          name: item.studentName,
+          phone: item.phone,
+          status: r.ok ? 'success' as const : 'failed' as const,
+          message: r.ok ? 'قبلتها البوابة (بانتظار إرسال الهاتف)' : r.error === 'aborted' ? 'لم تُرسل بعد (متوقفة مؤقتاً)' : proxyErrorMessage(r.error),
+          content: item.logContent ?? item.content
+        };
+      };
+      const abort = new AbortController();
+      silentAbortRef.current = abort;
+      let stopReason: PauseReason | undefined;
+      let itemStop = false;
+      const { results, fatalError, aborted } = await sendViaProxy(
+        invokeSmsFunction,
+        keyed.map(k => ({ id: k.key, phone: k.item.phone, text: k.item.content })),
+        partial => {
+          if (partial.some(r => r.error && PAUSE_ON_ITEM_ERRORS.has(r.error))) itemStop = true;
+          const rows = partial.map(toRow);
+          const ok = partial.filter(r => r.ok).length;
+          const last = partial[partial.length - 1];
+          setSilentProgress(prev => ({
+            ...prev,
+            current: partial.length,
+            studentName: last ? byKey.get(last.id)?.studentName || '' : prev.studentName,
+            successCount: ok,
+            failedCount: partial.length - ok,
+            results: rows
+          }));
+        },
+        {
+          delayMs: readBatchDelaySec() * 1000,
+          signal: abort.signal,
+          // Persist "in flight" BEFORE the request leaves: after a crash these are never auto-resent.
+          onBatchStart: ids => save(markInflight(job, ids)),
+          shouldStop: () => {
+            if (itemStop) return true;
+            if (!quietOverride && isQuietHours()) { stopReason = 'quiet_hours'; return true; }
+            return false;
+          },
+        }
+      );
+      if (aborted && !stopReason) stopReason = 'manual';
+      const finalJob = applyResults(job, results, { fatalError, pauseReason: stopReason });
+      if (jobNeedsAttention(finalJob)) save(finalJob);
+      else { job = finalJob; clearJob(); }
+      const counts = jobCounts(finalJob);
+
+      // History: only messages the gateway accepted or genuinely rejected. Messages that never left
+      // (paused/refused before sending) stay in the job for resume and are not logged as failures.
+      const stateByKey = new Map(finalJob.entries.map(e => [e.key, e.state]));
+      const realResults = results.filter(r => {
+        const st = stateByKey.get(r.id);
+        return (st === 'accepted' && r.ok) || (st === 'failed' && !r.ok);
+      });
+      const now = new Date().toISOString();
+      const generatedLogs: MessageLog[] = realResults.map(r => {
+        const item = byKey.get(r.id)!;
+        return {
+          id: newLogId(),
+          studentId: item.studentId,
+          studentName: item.studentName,
+          parentName: item.parentName,
+          phone: item.phone,
+          grade: item.grade,
+          section: item.section,
+          messageContent: item.logContent ?? item.content, // never store the Moodle password in logs
+          sentTime: now,
+          status: r.ok ? 'pending' as const : 'failed' as const,
+          failureReason: r.ok ? undefined : proxyErrorMessage(r.error),
+          gatewayMessageId: r.gatewayMessageId,
+          gatewayState: r.ok ? 'Pending' : undefined,
+          channel: 'gateway' as const,
+          campaignId: finalJob.campaignId,
+          contentTemplate: finalJob.contentTemplate,
+          isTest: finalJob.isTest,
+        };
+      });
+      if (generatedLogs.length) emitLogs(generatedLogs, { stayOnTab: true });
+      else activeCampaignIdRef.current = undefined;
+
+      const pausedText = finalJob.status === 'paused'
+        ? `متوقف مؤقتاً (${PAUSE_REASON_LABELS[finalJob.pauseReason ?? 'manual']}${finalJob.lastError ? `: ${proxyErrorMessage(finalJob.lastError)}` : ''}) — بقيت ${counts.queued} رسالة لم تُرسل. يمكنك «استئناف الإرسال» من شاشة الإرسال حتى بعد إعادة تحميل الصفحة. `
+        : '';
+      const unknownText = counts.unknown ? `تنبيه: ${counts.unknown} رسالة حالتها غير معروفة (انقطع الاتصال أثناء إرسالها) ولن يُعاد إرسالها تلقائياً — تحقق منها في التقارير أو على الهاتف. ` : '';
+
+      // Follow the real per-message state on the phone until Delivered/Failed/Cancelled
+      // (backoff 10s→30s, capped at 30 minutes). The webhook updates the history too.
+      const gatewayIds = realResults.filter(r => r.ok && r.gatewayMessageId).map(r => r.gatewayMessageId!);
+      const latest = new Map<string, GatewayStatus>(gatewayIds.map(id => [id, { id, state: 'Pending' as const }]));
+      const applyStatuses = (m: Map<string, GatewayStatus>) => {
+        for (const st of m.values()) {
+          const cur = latest.get(st.id);
+          if (cur && mergeState(cur.state, st.state)) latest.set(st.id, st);
+        }
+        const gc = countGatewayStates(latest.values());
+        onGatewayStatuses?.(new Map(latest));
+        setSilentProgress(prev => ({
+          ...prev,
+          gatewayCounts: gc,
+          statusText: prev.stage === 'polling' ? `${pausedText}${gatewayCountsText(gc)} — المتابعة مستمرة حتى التسليم أو الفشل (حتى 30 دقيقة)` : `${pausedText}${gatewayCountsText(gc)}`,
+          results: results.map(r => {
+            const row = toRow(r);
+            const st = r.gatewayMessageId ? latest.get(r.gatewayMessageId) : undefined;
+            if (!st) return row;
+            const failed = st.state === 'Failed' || st.state === 'Cancelled';
+            return { ...row, status: failed ? 'failed' as const : 'success' as const, message: `${GATEWAY_STATE_LABELS[st.state]}${st.error ? `: ${st.error}` : ''}` };
+          }),
+        }));
+      };
+      manualRefreshRef.current = gatewayIds.length
+        ? async () => applyStatuses(await fetchStatusesOnce(invokeSmsFunction, new Map([...latest].map(([id, st]) => [id, st.state]))))
+        : null;
+      if (gatewayIds.length && !abort.signal.aborted) {
+        setSilentProgress(prev => ({ ...prev, stage: 'polling', statusText: `${pausedText}قبلتها البوابة: ${gatewayIds.length} — جاري متابعة الحالة على الهاتف حتى التسليم أو الفشل (حتى 30 دقيقة)...` }));
+        applyStatuses(await pollMessageStatus(invokeSmsFunction, gatewayIds, { signal: abort.signal, onUpdate: applyStatuses }));
+      }
+      silentAbortRef.current = null;
+      setPendingJob(jobNeedsAttention(finalJob) ? finalJob : null);
+
+      setSilentProgress(prev => ({
+        ...prev,
+        stage: 'finished',
+        statusText: `${pausedText}${unknownText}${fatalError && finalJob.status !== 'paused' ? `توقف الإرسال: ${proxyErrorMessage(fatalError)} ` : ''}${gatewayCountsText(countGatewayStates(latest.values()))}${[...latest.values()].some(st => !['Delivered', 'Failed', 'Cancelled'].includes(st.state)) ? ' — يمكن تحديث الباقي لاحقاً من «تحديث الحالة» أو تلقائياً عبر الويب هوك.' : ''}`
+      }));
+    })();
+  };
+
+  /** Rebuilds the remaining messages from current data and opens the same pre-send confirmation. */
+  const startResume = async () => {
+    const job = readJob() ?? pendingJob;
+    if (!job || !jobHasRemaining(job)) {
+      setPendingJob(job && jobNeedsAttention(job) ? job : null);
+      return;
+    }
+    if (!useSilentGateway) {
+      alert('الاستئناف متاح فقط عند تفعيل الإرسال عبر البوابة السحابية (إعدادات SMS).');
+      return;
+    }
+    setResumeBusy(true);
+    try {
+      let creds = moodleCreds;
+      if (templateUsesCredentials(job.contentTemplate) && loadMoodleCredentials) {
+        try {
+          creds = credentialsByNationalId(await loadMoodleCredentials());
+        } catch {
+          alert('تعذر تحميل بيانات دخول مودل اللازمة لهذا القالب. حاول مرة أخرى.');
+          return;
+        }
+      }
+      const render: DispatchRender = (tpl, st, o) =>
+        renderWithMoodle(tpl, st, { credentials: creds, events: sectionEvents, maskSecrets: o?.maskSecrets });
+      const plan = planResume(job, students, render, suppressedPhones);
+      if (!plan.keyed.length) {
+        const updated = applySkips(job, plan.skipped);
+        if (jobNeedsAttention(updated)) { writeJob(updated); setPendingJob(updated); } else { clearJob(); setPendingJob(null); }
+        alert(`لا توجد رسائل متبقية يمكن إرسالها (${plan.skipped.length} مستبعدة: قائمة عدم الإرسال، أو طالب محذوف، أو رقم تغيّر).`);
+        return;
+      }
+      const missingMoodle = new Set(
+        plan.keyed
+          .map(k => students.find(st => st.id === k.item.studentId))
+          .filter((st): st is Student => Boolean(st) && missingMoodleFields(job.contentTemplate, attachCredentials(st as Student, creds)).length > 0)
+          .map(st => st.id)
+      ).size;
+      setResumeState({ job, plan, missingMoodle });
+    } finally {
+      setResumeBusy(false);
+    }
+  };
+
+  // Inline two-step discard (no window.confirm).
+  const [discardArmed, setDiscardArmed] = useState(false);
+  const discardPendingJob = () => {
+    clearJob();
+    setPendingJob(null);
+    setDiscardArmed(false);
+  };
+
   // Dispatch campaign (either immediate simulation/real or schedule creation)
   const handleDispatchCampaign = (e: React.FormEvent) => {
     e.preventDefault();
@@ -843,6 +1062,9 @@ export default function MessageComposer({
     if (!messageContent.trim()) return alert('الرجاء كتابة محتوى الرسالة.');
     if (deliveryMode === 'schedule' && (!scheduleDate || !scheduleTime)) {
       return alert('الرجاء تحديد تاريخ ووقت جدولة الرسالة بشكل صحيح.');
+    }
+    if (deliveryMode === 'now' && useSilentGateway && jobHasRemaining(readJob())) {
+      return alert('يوجد إرسال متوقف مؤقتاً لم يكتمل. استأنفه أو ألغِ الباقي أولاً (الشريط أعلى نموذج الإرسال).');
     }
     // Always show the confirmation dialog first (count, SMS parts, cost, real preview)
     if (!confirmedRef.current) {
@@ -894,124 +1116,17 @@ export default function MessageComposer({
       }
 
       if (useSilentGateway) {
-        // Cloud gateway: batches go to the authenticated Edge Function (max 50 recipients per call).
-        setSilentProgress({
-          current: 0,
-          total: itemsToDispatch.length,
-          studentName: itemsToDispatch[0]?.studentName || '',
-          stage: 'sending',
-          successCount: 0,
-          failedCount: 0,
-          statusText: 'جاري إرسال الرسائل عبر خادم الإرسال الآمن...',
-          results: []
+        // Cloud gateway: batches go to the authenticated Edge Function. The job is persisted so it
+        // can be paused and resumed (even after a reload) without re-sending accepted messages.
+        const { job, keyed } = createJob(itemsToDispatch, {
+          id: newLogId(),
+          title: campaignTitle,
+          contentTemplate: messageContent,
+          phoneTarget,
+          isTest: isTestCampaign,
+          campaignId: activeCampaignIdRef.current,
         });
-        setIsSilentBroadcastActive(true);
-
-        (async () => {
-          const keyed = itemsToDispatch.map((item, idx) => ({ key: `m${idx}`, item }));
-          const byKey = new Map(keyed.map(k => [k.key, k.item]));
-          const toRow = (r: ProxyItemResult) => {
-            const item = byKey.get(r.id)!;
-            return {
-              name: item.studentName,
-              phone: item.phone,
-              status: r.ok ? 'success' as const : 'failed' as const,
-              message: r.ok ? 'قبلتها البوابة (بانتظار إرسال الهاتف)' : proxyErrorMessage(r.error),
-              content: item.logContent ?? item.content
-            };
-          };
-          const abort = new AbortController();
-          silentAbortRef.current = abort;
-          const { results, fatalError, aborted } = await sendViaProxy(
-            invokeSmsFunction,
-            keyed.map(k => ({ id: k.key, phone: k.item.phone, text: k.item.content })),
-            partial => {
-              const rows = partial.map(toRow);
-              const ok = partial.filter(r => r.ok).length;
-              const last = partial[partial.length - 1];
-              setSilentProgress(prev => ({
-                ...prev,
-                current: partial.length,
-                studentName: last ? byKey.get(last.id)?.studentName || '' : prev.studentName,
-                successCount: ok,
-                failedCount: partial.length - ok,
-                results: rows
-              }));
-            },
-            { delayMs: readBatchDelaySec() * 1000, signal: abort.signal }
-          );
-
-          // A request-level failure (e.g. gateway not configured) sent nothing: do not record fake history.
-          const nothingSent = fatalError === 'sms_gateway_not_configured' || fatalError === 'unauthorized' || fatalError === 'not_allowed';
-          const now = new Date().toISOString();
-          // History is saved right away (accepted = 'pending'); states are updated as they arrive
-          // (polling below, the webhook, or "تحديث الحالة" in reports).
-          const generatedLogs: MessageLog[] = results.map(r => {
-            const item = byKey.get(r.id)!;
-            return {
-              id: newLogId(),
-              studentId: item.studentId,
-              studentName: item.studentName,
-              parentName: item.parentName,
-              phone: item.phone,
-              grade: item.grade,
-              section: item.section,
-              messageContent: item.logContent ?? item.content, // never store the Moodle password in logs
-              sentTime: now,
-              status: r.ok ? 'pending' as const : 'failed' as const,
-              failureReason: r.ok ? undefined : proxyErrorMessage(r.error),
-              gatewayMessageId: r.gatewayMessageId,
-              gatewayState: r.ok ? 'Pending' : undefined,
-              channel: 'gateway' as const,
-              campaignId: activeCampaignIdRef.current,
-              contentTemplate: messageContent,
-              isTest: isTestCampaign,
-            };
-          });
-          if (nothingSent) activeCampaignIdRef.current = undefined;
-          else emitLogs(generatedLogs, { stayOnTab: true });
-
-          // Follow the real per-message state on the phone until Delivered/Failed/Cancelled
-          // (backoff 10s→30s, capped at 30 minutes). The webhook updates the history too.
-          const gatewayIds = results.filter(r => r.ok && r.gatewayMessageId).map(r => r.gatewayMessageId!);
-          const latest = new Map<string, GatewayStatus>(gatewayIds.map(id => [id, { id, state: 'Pending' as const }]));
-          const applyStatuses = (m: Map<string, GatewayStatus>) => {
-            for (const st of m.values()) {
-              const cur = latest.get(st.id);
-              if (cur && mergeState(cur.state, st.state)) latest.set(st.id, st);
-            }
-            const counts = countGatewayStates(latest.values());
-            onGatewayStatuses?.(new Map(latest));
-            setSilentProgress(prev => ({
-              ...prev,
-              gatewayCounts: counts,
-              statusText: prev.stage === 'polling' ? `${gatewayCountsText(counts)} — المتابعة مستمرة حتى التسليم أو الفشل (حتى 30 دقيقة)` : gatewayCountsText(counts),
-              results: results.map(r => {
-                const row = toRow(r);
-                const st = r.gatewayMessageId ? latest.get(r.gatewayMessageId) : undefined;
-                if (!st) return row;
-                const failed = st.state === 'Failed' || st.state === 'Cancelled';
-                return { ...row, status: failed ? 'failed' as const : 'success' as const, message: `${GATEWAY_STATE_LABELS[st.state]}${st.error ? `: ${st.error}` : ''}` };
-              }),
-            }));
-          };
-          manualRefreshRef.current = gatewayIds.length && !nothingSent
-            ? async () => applyStatuses(await fetchStatusesOnce(invokeSmsFunction, new Map([...latest].map(([id, st]) => [id, st.state]))))
-            : null;
-          if (gatewayIds.length && !nothingSent) {
-            setSilentProgress(prev => ({ ...prev, stage: 'polling', statusText: `قبلتها البوابة: ${gatewayIds.length} — جاري متابعة الحالة على الهاتف حتى التسليم أو الفشل (حتى 30 دقيقة)...` }));
-            applyStatuses(await pollMessageStatus(invokeSmsFunction, gatewayIds, { signal: abort.signal, onUpdate: applyStatuses }));
-          }
-          silentAbortRef.current = null;
-
-          setSilentProgress(prev => ({
-            ...prev,
-            stage: 'finished',
-            statusText: fatalError
-              ? `توقف الإرسال: ${proxyErrorMessage(fatalError)}`
-              : `${aborted ? 'أُوقف الإرسال/المتابعة يدوياً. ' : ''}${gatewayCountsText(countGatewayStates(latest.values()))}${[...latest.values()].some(st => !['Delivered', 'Failed', 'Cancelled'].includes(st.state)) ? ' — يمكن تحديث الباقي لاحقاً من «تحديث الحالة» أو تلقائياً عبر الويب هوك.' : ''}`
-          }));
-        })();
+        runGatewayJob(job, keyed, confirmDecisionRef.current.quietHoursOverride);
       } else {
         // Standard Manual clicks with Pop-ups (Free sequential browser mode)
         setSequentialQueue(itemsToDispatch);
@@ -1443,6 +1558,93 @@ export default function MessageComposer({
           <div className="p-3 rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-800 text-xs" id="prefill-campaign-banner">
             تم تحميل الحملة المجدولة «{activePrefillTitle}». الحملات المجدولة لا تُرسل تلقائياً — راجع المستلمين والنص ثم اضغط إرسال وأكّد.
           </div>
+        )}
+        {pendingJob && !isSilentBroadcastActive && (() => {
+          const c = jobCounts(pendingJob);
+          return (
+            <div className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 text-xs space-y-2" id="paused-bulk-send-banner" data-job-status={pendingJob.status}>
+              <div className="font-bold">
+                {c.queued > 0
+                  ? `إرسال متوقف مؤقتاً: «${pendingJob.title}» — ${PAUSE_REASON_LABELS[pendingJob.pauseReason ?? 'manual']}`
+                  : `إرسال انتهى مع رسائل غير مؤكدة: «${pendingJob.title}»`}
+              </div>
+              <div id="paused-bulk-send-counts">
+                قبلتها البوابة: {c.accepted} · فشلت: {c.failed} · متبقية لم تُرسل: <strong>{c.queued}</strong>
+                {c.skipped ? ` · مستبعدة: ${c.skipped}` : ''}
+                {c.unknown ? ` · غير معروفة: ${c.unknown}` : ''}
+                {pendingJob.lastError ? ` · آخر خطأ: ${proxyErrorMessage(pendingJob.lastError)}` : ''}
+              </div>
+              {c.unknown > 0 && (
+                <p className="text-rose-800" id="paused-bulk-send-unknown">
+                  {c.unknown} رسالة انقطع الاتصال أثناء إرسالها؛ قد تكون وصلت. لن يُعاد إرسالها تلقائياً أبداً — تحقق منها في التقارير أو تطبيق البوابة على الهاتف.
+                </p>
+              )}
+              {c.skipped > 0 && (
+                <p className="text-slate-600">
+                  المستبعدة: {Object.entries(pendingJob.entries.filter(e => e.state === 'skipped').reduce<Record<string, number>>((acc, e) => {
+                    const k = SKIP_REASON_LABELS[e.error as keyof typeof SKIP_REASON_LABELS] ?? 'أخرى';
+                    acc[k] = (acc[k] ?? 0) + 1;
+                    return acc;
+                  }, {})).map(([k, n]) => `${k} (${n})`).join('، ')}
+                </p>
+              )}
+              <p className="text-slate-600">
+                الاستئناف يرسل فقط الرسائل التي لم تُرسل بعد، بعد إعادة بنائها من بيانات الطلاب الحالية وقائمة عدم الإرسال، ومع نفس التأكيدات (ساعات الهدوء، تأكيد العدد عند 30 فأكثر، بيانات مودل).
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {c.queued > 0 && (
+                  <button
+                    type="button"
+                    id="btn-resume-bulk-send"
+                    disabled={resumeBusy}
+                    onClick={() => { void startResume(); }}
+                    className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold cursor-pointer"
+                  >
+                    {resumeBusy ? 'جاري التحضير...' : `استئناف الإرسال (${c.queued})`}
+                  </button>
+                )}
+                {!discardArmed ? (
+                  <button
+                    type="button"
+                    id="btn-discard-bulk-send"
+                    onClick={() => (c.queued > 0 ? setDiscardArmed(true) : discardPendingJob())}
+                    className="px-3 py-1.5 rounded-lg bg-white border border-amber-300 hover:bg-amber-100 font-bold cursor-pointer"
+                  >
+                    {c.queued > 0 ? 'إلغاء الباقي' : 'إخفاء التنبيه'}
+                  </button>
+                ) : (
+                  <span className="flex flex-wrap items-center gap-2" id="discard-bulk-send-confirm">
+                    <span className="text-rose-800 font-bold">سيتم إلغاء {c.queued} رسالة متبقية ولن تُرسل (المرسلة سابقاً تبقى في التقارير).</span>
+                    <button type="button" id="btn-discard-bulk-send-confirm" onClick={discardPendingJob} className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold cursor-pointer">تأكيد الإلغاء</button>
+                    <button type="button" id="btn-discard-bulk-send-cancel" onClick={() => setDiscardArmed(false)} className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 font-bold cursor-pointer">تراجع</button>
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+        {resumeState && (
+          <ConfirmSendDialog
+            open
+            mode="now"
+            studentCount={new Set(resumeState.plan.keyed.map(k => k.item.studentId)).size}
+            contents={resumeState.plan.keyed.map(k => k.item.content)}
+            excludedCount={resumeState.plan.skipped.length}
+            sampleText={resumeState.plan.keyed[0]?.item.content ?? ''}
+            sampleMaskedText={resumeState.plan.keyed[0]?.item.logContent}
+            samples={resumeState.plan.keyed.slice(0, 5).map(k => ({ label: k.item.studentName, text: k.item.content, maskedText: k.item.logContent }))}
+            missingMoodleCount={resumeState.missingMoodle}
+            sampleRecipientLabel={resumeState.plan.keyed[0]?.item.studentName}
+            quietHoursActive={isQuietHours()}
+            duplicateCount={duplicateWarningCount(findDuplicateSends(resumeState.plan.keyed.map(k => k.item), recentLogs))}
+            requiresCredentialsConfirm={templateUsesCredentials(resumeState.job.contentTemplate)}
+            onCancel={() => setResumeState(null)}
+            onConfirm={(decision) => {
+              const { job, plan } = resumeState;
+              setResumeState(null);
+              runGatewayJob(applySkips(job, plan.skipped), plan.keyed, Boolean(decision?.quietHoursOverride));
+            }}
+          />
         )}
         <ConfirmSendDialog
           open={confirmOpen && !!confirmData}
@@ -2167,7 +2369,7 @@ export default function MessageComposer({
                     onClick={() => silentAbortRef.current?.abort()}
                     className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl cursor-pointer font-sans"
                   >
-                    {silentProgress.stage === 'sending' ? 'إيقاف الإرسال' : 'إيقاف المتابعة'}
+                    {silentProgress.stage === 'sending' ? 'إيقاف مؤقت' : 'إيقاف المتابعة'}
                   </button>
                 </>
               ) : (
