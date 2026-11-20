@@ -697,7 +697,7 @@ export default function ExcelImporter({
                   قراءة وتحليل كشف الطلاب ناجحة! وجدنا {successCount} سِجلاً مفرداً وجاهزاً للتأكيد.
                 </div>
 
-                <div className="mt-3 max-h-[160px] overflow-y-auto border border-emerald-100 rounded-lg bg-white">
+                <div className="mt-3 max-h-[160px] overflow-auto border border-emerald-100 rounded-lg bg-white">
                   <table className="w-full text-right text-xs text-slate-650 font-sans">
                     <thead className="bg-slate-50 text-slate-700 sticky top-0 border-b border-slate-100">
                       <tr>
@@ -732,7 +732,7 @@ export default function ExcelImporter({
                 {phoneIssues.length > 0 && (
                   <div className="mt-3 border border-amber-200 bg-amber-50/60 rounded-lg p-3" id="import-invalid-phones">
                     <div className="text-xs font-bold text-amber-900 mb-2">تقرير الأرقام غير الصالحة ({phoneIssues.length})</div>
-                    <div className="max-h-[140px] overflow-y-auto bg-white border border-amber-100 rounded-md">
+                    <div className="max-h-[140px] overflow-auto bg-white border border-amber-100 rounded-md">
                       <table className="w-full text-right text-[11px]">
                         <thead className="bg-slate-50"><tr><th className="p-1.5">صف الملف</th><th className="p-1.5">الطالب</th><th className="p-1.5">المشكلة</th></tr></thead>
                         <tbody>

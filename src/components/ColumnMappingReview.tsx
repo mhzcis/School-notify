@@ -32,7 +32,7 @@ export default function ColumnMappingReview({ headers, autoMap, overrides, onCha
           راجع اقتراح النظام وعدّل إن لزم. لا يمكن ربط عمود الاسم الإنجليزي باسم الطالب العربي، ولا عمود مهنة ولي الأمر باسم ولي الأمر. أعمدة الملاحظات وكلمات المرور تُتجاهل ولا تُستورد.
         </p>
       </div>
-      <div className="max-h-[280px] overflow-y-auto border border-slate-100 rounded-lg">
+      <div className="max-h-[280px] overflow-auto border border-slate-100 rounded-lg">
         <table className="w-full text-right text-xs">
           <thead className="bg-slate-50 sticky top-0">
             <tr>

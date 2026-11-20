@@ -21,6 +21,7 @@ import Scheduler from './components/Scheduler';
 import ReportsPanel from './components/ReportsPanel';
 import SmsGatewaySettings, { GatewayStatus } from './components/SmsGatewaySettings';
 import HelpPage from './components/HelpPage';
+import { nextTheme, readTheme, THEME_LABELS, writeTheme, type ThemePref } from './lib/theme';
 import BackupPanel from './components/BackupPanel';
 import MoodleTools from './components/MoodleTools';
 import { RepoError, SchoolRepository, repoErrorMessage } from './lib/repo/types';
@@ -55,7 +56,10 @@ import {
   Loader2,
   RefreshCw,
   GraduationCap,
-  HelpCircle
+  HelpCircle,
+  Moon,
+  Sun,
+  Monitor
 } from 'lucide-react';
 
 export interface AppProps {
@@ -75,6 +79,7 @@ const SEEDED_KEY = (uid: string) => `sn_default_templates_seeded:${uid}`;
 export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway, invokeSms = invokeSmsFunction }: AppProps) {
   // Navigation / UI States
   const [composerPrefill, setComposerPrefill] = useState<ComposerPrefill | null>(null);
+  const [themePref, setThemePref] = useState<ThemePref>(() => readTheme());
   const [activeTab, setActiveTab] = useState<'overview' | 'compose' | 'importer' | 'moodle' | 'templates' | 'scheduler' | 'reports' | 'sms-config' | 'backup' | 'help'>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -633,7 +638,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
       )}
 
       {/* Navigation Topbar for Mobile */}
-      <header className="md:hidden bg-slate-900 text-white px-5 py-4 flex items-center justify-between sticky top-0 z-40 shadow-md">
+      <header className="sn-keep-palette md:hidden bg-slate-900 text-white px-5 py-4 flex items-center justify-between sticky top-0 z-40 shadow-md">
         <div className="flex items-center gap-2">
           <div className="p-1 px-2.5 bg-emerald-600 rounded-lg text-white font-black text-xs">
             رـسـاـل
@@ -652,7 +657,7 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
 
       {/* Persistence Sidebar panel: Desktop / Mobile overlay */}
       <aside 
-        className={`bg-slate-900 text-slate-200 w-64 shrink-0 p-5 flex flex-col justify-between fixed md:sticky top-0 h-screen z-40 transition-transform duration-300 ${
+        className={`sn-keep-palette bg-slate-900 text-slate-200 w-64 shrink-0 p-5 flex flex-col justify-between fixed md:sticky top-0 h-screen z-40 transition-transform duration-300 ${
           mobileMenuOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0'
         }`}
         id="app-drawer-sidebar"
@@ -759,6 +764,17 @@ export default function App({ repo, user, onSignOut, onAuthFailure, checkGateway
               <span>{GATEWAY_STATUS_LABELS[gatewayStatus]}</span>
             </div>
           </div>
+          <button
+            type="button"
+            onClick={() => { const n = nextTheme(themePref); setThemePref(n); writeTheme(n); }}
+            className="w-full flex items-center gap-2 text-[10px] font-bold text-slate-300 hover:text-white bg-slate-800 px-2 py-1.5 rounded-md cursor-pointer transition"
+            id="theme-toggle"
+            data-theme={themePref}
+            title="تبديل المظهر"
+          >
+            {themePref === 'dark' ? <Moon className="w-3 h-3" /> : themePref === 'system' ? <Monitor className="w-3 h-3" /> : <Sun className="w-3 h-3" />}
+            {THEME_LABELS[themePref]}
+          </button>
           <div className="flex items-center justify-between gap-2 pt-2">
             <span className="text-[10px] text-slate-400 truncate" dir="ltr" title={user.email || ''}>{user.email}</span>
             <button
