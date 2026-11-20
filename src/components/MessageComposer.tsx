@@ -16,7 +16,7 @@ import { duplicateWarningCount, findDuplicateSends, isQuietHours } from '../lib/
 import SecretText from './SecretText';
 import StudentEditDialog from './StudentEditDialog';
 import type { StudentEditPatch } from '../lib/studentEdit';
-import { buildDispatchItems } from '../lib/recipients';
+import { buildDispatchItems, EXCLUSION_LABELS } from '../lib/recipients';
 import { matchNames } from '../lib/nameMatching';
 import { segmentInfo } from '../lib/sms';
 import ConfirmSendDialog from './ConfirmSendDialog';
@@ -112,6 +112,8 @@ interface MessageComposerProps {
   sectionEvents?: SectionEvent[];
   /** Loads owner-only Moodle credentials when the template needs them. Never logged. */
   loadMoodleCredentials?: () => Promise<MoodleCredential[]>;
+  /** Do-not-send list (local 05XXXXXXXX). These numbers are excluded from every send. */
+  suppressedPhones?: Set<string>;
 }
 
 export interface ComposerPrefill {
@@ -121,6 +123,8 @@ export interface ComposerPrefill {
   studentIds: string[];
   phoneTarget: 'primary' | 'secondary' | 'both';
 }
+
+const EMPTY_SUPPRESSED = new Set<string>();
 
 export default function MessageComposer({
   students,
@@ -142,6 +146,7 @@ export default function MessageComposer({
   onDeleteGroup,
   sectionEvents = [],
   loadMoodleCredentials,
+  suppressedPhones = EMPTY_SUPPRESSED,
 }: MessageComposerProps) {
   // Campaign id of a scheduled campaign loaded via "send now"; attached to the resulting logs
   const activeCampaignIdRef = useRef<string | undefined>(undefined);
@@ -617,8 +622,8 @@ export default function MessageComposer({
 
   // Recipients that will be excluded because they lack a valid mobile number (visible warning)
   const phoneExclusions = useMemo(
-    () => buildDispatchItems(filteredRecipients, phoneTarget, '', () => '').excluded,
-    [filteredRecipients, phoneTarget]
+    () => buildDispatchItems(filteredRecipients, phoneTarget, '', () => '', suppressedPhones).excluded,
+    [filteredRecipients, phoneTarget, suppressedPhones]
   );
 
   const [moodleCreds, setMoodleCreds] = useState<Map<string, MoodleCredential>>(new Map());
@@ -656,10 +661,10 @@ export default function MessageComposer({
   const confirmDecisionRef = useRef<{ quietHoursOverride: boolean; credentialsConfirmed: boolean }>({ quietHoursOverride: false, credentialsConfirmed: false });
   const confirmData = useMemo(() => {
     if (!confirmOpen) return null;
-    const { items, excluded } = buildDispatchItems(filteredRecipients, phoneTarget, messageContent, evaluatePlaceholders);
+    const { items, excluded } = buildDispatchItems(filteredRecipients, phoneTarget, messageContent, evaluatePlaceholders, suppressedPhones);
     return { items, excluded };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [confirmOpen, filteredRecipients, phoneTarget, messageContent]);
+  }, [confirmOpen, filteredRecipients, phoneTarget, messageContent, suppressedPhones]);
 
   // 3. AUTO ADVANCE COUNTDOWN FOR SEQUENTIAL SENDER
   useEffect(() => {
@@ -880,7 +885,8 @@ export default function MessageComposer({
         filteredRecipients,
         phoneTarget,
         messageContent,
-        evaluatePlaceholders
+        evaluatePlaceholders,
+        suppressedPhones
       );
 
       if (itemsToDispatch.length === 0) {
@@ -1629,13 +1635,13 @@ export default function MessageComposer({
         {phoneExclusions.length > 0 && (
           <div className="p-3 rounded-xl border border-amber-200 bg-amber-50 text-amber-800 text-xs space-y-1" id="excluded-phones-warning">
             <div className="font-bold">
-              ⚠️ سيتم استبعاد ({phoneExclusions.length}) رقم من الإرسال لعدم وجود رقم جوال صالح:
+              ⚠️ سيتم استبعاد ({phoneExclusions.length}) رقم من الإرسال (رقم غير صالح أو في قائمة عدم الإرسال):
             </div>
             <ul className="list-disc pr-5 max-h-32 overflow-y-auto">
               {phoneExclusions.slice(0, 50).map((ex, i) => (
                 <li key={`${ex.studentId}-${ex.which}-${i}`}>
-                  {ex.studentName} — {ex.which === 'primary' ? 'الرقم الرئيسي' : 'الرقم البديل'}: {PHONE_PROBLEM_LABELS[ex.problem]}
-                  {ex.rawPhone ? <span dir="ltr" className="font-mono"> ({ex.rawPhone})</span> : null}
+                  {ex.studentName} — {ex.which === 'primary' ? 'الرقم الرئيسي' : 'الرقم البديل'}: {EXCLUSION_LABELS[ex.problem]}
+                  {ex.rawPhone && ex.problem !== 'suppressed' ? <span dir="ltr" className="font-mono"> ({ex.rawPhone})</span> : null}
                 </li>
               ))}
               {phoneExclusions.length > 50 && <li>... و{phoneExclusions.length - 50} آخرين</li>}

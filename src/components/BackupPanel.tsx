@@ -132,6 +132,7 @@ export default function BackupPanel({ data, repo, onRestored }: BackupPanelProps
               <li>
                 الطلاب: {pending.summary.students} • القوالب: {pending.summary.templates} • الحملات: {pending.summary.campaigns} • السجلات: {pending.summary.logs}
                 {' '}• المجموعات: {pending.summary.groups}
+                {' '}• قائمة عدم الإرسال: {pending.summary.suppressed}
               </li>
               {pending.summary.hasPrefs && <li>تتضمن هذه النسخة اسم المدرسة والإعدادات غير السرية.</li>}
               <li className="text-amber-700">لن تُستورد كلمات مرور مودل أو الملاحظات إن وُجدت في ملف قديم. تبقى أي بيانات محفوظة حالياً كما هي.</li>

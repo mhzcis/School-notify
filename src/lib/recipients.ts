@@ -4,7 +4,7 @@
  * and returned in `excluded` so the UI can show a visible warning.
  */
 import type { Student } from '../types';
-import { checkPhone, PhoneProblem } from './phone';
+import { checkPhone, PhoneProblem, PHONE_PROBLEM_LABELS } from './phone';
 import { renderTemplate, templateUsesSecrets } from './template';
 
 export type PhoneTarget = 'primary' | 'secondary' | 'both';
@@ -27,8 +27,16 @@ export interface ExcludedRecipient {
   studentName: string;
   which: 'primary' | 'secondary';
   rawPhone: string;
-  problem: PhoneProblem;
+  problem: ExclusionProblem;
 }
+
+/** Why a number was not sent to: an unusable phone, or the do-not-send list. */
+export type ExclusionProblem = PhoneProblem | 'suppressed';
+
+export const EXCLUSION_LABELS: Record<ExclusionProblem, string> = {
+  ...PHONE_PROBLEM_LABELS,
+  suppressed: 'في قائمة عدم الإرسال',
+};
 
 export type DispatchRender = (tpl: string, student: Student, options?: { maskSecrets?: boolean }) => string;
 
@@ -36,7 +44,8 @@ export function buildDispatchItems(
   students: Student[],
   phoneTarget: PhoneTarget,
   template: string,
-  render: DispatchRender = (tpl, s, opts) => renderTemplate(tpl, s, opts)
+  render: DispatchRender = (tpl, s, opts) => renderTemplate(tpl, s, opts),
+  suppressed: Set<string> = new Set()
 ): { items: DispatchItem[]; excluded: ExcludedRecipient[] } {
   const items: DispatchItem[] = [];
   const excluded: ExcludedRecipient[] = [];
@@ -59,6 +68,10 @@ export function buildDispatchItems(
       }
       if (seen.has(check.local)) continue; // same number twice -> send once
       seen.add(check.local);
+      if (suppressed.has(check.local)) {
+        excluded.push({ studentId: s.id, studentName: s.name, which, rawPhone: raw ? String(raw) : '', problem: 'suppressed' });
+        continue;
+      }
       if (content === null) {
         content = render(template, s);
         logContent = templateUsesSecrets(template) ? render(template, s, { maskSecrets: true }) : content;

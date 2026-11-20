@@ -1,3 +1,4 @@
+import { parseSuppressed, type SuppressedPhone } from '../suppression';
 import { mergeState } from '../../../supabase/functions/school-notify-sms-webhook/webhook';
 /**
  * In-memory SchoolRepository fake for tests. Mirrors the Supabase semantics that matter:
@@ -23,6 +24,9 @@ export class InMemorySchoolRepository implements SchoolRepository {
   credentialsAvailable = true;
   sectionEvents = new Map<string, SectionEvent>();
   schedulerSettings: SchedulerSettings = defaultSchedulerSettings();
+  suppressed = new Map<string, SuppressedPhone>();
+  /** When false, listSuppressedPhones reports the table as missing. */
+  suppressionAvailable = true;
   /** Sizes of each student upsert request (to assert chunking). */
   studentBatches: number[] = [];
   /** When set, the next call throws this error kind. */
@@ -214,6 +218,27 @@ export class InMemorySchoolRepository implements SchoolRepository {
     this.maybeFail();
     if (!this.credentialsAvailable) throw new RepoError('other', 'credentials_unavailable');
     this.credentials.delete(String(nationalId).trim());
+  }
+
+  async listSuppressedPhones(): Promise<{ available: boolean; rows: SuppressedPhone[] }> {
+    this.maybeFail();
+    if (!this.suppressionAvailable) return { available: false, rows: [] };
+    return { available: true, rows: [...this.suppressed.values()].map(r => ({ ...r })) };
+  }
+
+  async upsertSuppressedPhone(entry: SuppressedPhone): Promise<void> {
+    this.maybeFail();
+    if (!this.suppressionAvailable) throw new RepoError('other', 'suppression_unavailable');
+    const p = parseSuppressed(entry.phone, entry.reason);
+    if (!p.ok) throw new RepoError('other', 'invalid_phone');
+    this.suppressed.set(p.entry.phone, { ...p.entry, createdAt: new Date().toISOString() });
+  }
+
+  async deleteSuppressedPhone(phone: string): Promise<void> {
+    this.maybeFail();
+    if (!this.suppressionAvailable) throw new RepoError('other', 'suppression_unavailable');
+    const p = parseSuppressed(phone, '');
+    if (p.ok) this.suppressed.delete(p.entry.phone);
   }
 
   async listSectionEvents(): Promise<SectionEvent[]> {
