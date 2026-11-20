@@ -1,30 +1,10 @@
--- NEEDS APPROVAL BEFORE APPLYING TO THE LIVE PROJECT.
--- Do not apply automatically. Take a cloud JSON backup first.
---
--- Additive only: creates school_notify.scheduler_settings and helper functions
--- used by the school-notify-scheduled Edge Function. Drops nothing, rewrites
--- no existing campaign or message rows.
---
--- Automatic sending stays OFF until ALL of the following are true:
---   1. This migration is applied.
---   2. The school-notify-scheduled Edge Function is deployed with
---      SCHEDULER_CRON_SECRET (and SMSGATE_* secrets already used by school-notify-sms).
---   3. The function secret SCHEDULER_ENABLED is set to the exact value "true".
---   4. The teacher enables the per-account switch in the app (defaults to false;
---      requires typing «تفعيل»).
---   5. A pg_cron / pg_net job (or equivalent) calls the function. The schedule
---      SQL at the bottom of this file is COMMENTED OUT and must not be run
---      until the secret is in Vault — never paste the secret into a file.
---
--- The app degrades safely without this table: the UI switch stays disabled
--- and no campaign is claimed or sent automatically.
---
--- Shared project hebrpniqdysrukejwmob: this file touches only school_notify.
--- It never references aoms_* or other schemas.
---
--- Quiet hours for due-campaign claiming: 22:00–07:00 Asia/Jerusalem.
--- scheduledTime values without a timezone are interpreted as Asia/Jerusalem
--- wall time (how the composer stores them).
+-- Applied on the dedicated SchoolNotify project (xxaafyikewdokbkzqzqm).
+-- Quiet hours for due-campaign claiming: 22:00-07:00 Asia/Jerusalem.
+-- scheduledTime values without a timezone are interpreted as Asia/Jerusalem wall time.
+-- Automatic sending stays off until SCHEDULER_ENABLED is exactly "true", a
+-- trusted scheduler is configured, and the teacher enables the per-account switch.
+-- The cron SQL at the bottom is commented out and must not be run with a secret
+-- pasted into a script (use Vault / current_setting).
 
 create table if not exists school_notify.scheduler_settings (
   owner uuid primary key,

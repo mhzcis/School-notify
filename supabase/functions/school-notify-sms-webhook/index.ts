@@ -5,7 +5,7 @@
 //   constant-time compare and a timestamp freshness window. Unsigned / stale / bad requests -> 401.
 // * Updates school_notify.messages ONLY through the SECURITY DEFINER RPC
 //   school_notify.apply_gateway_event(gateway id, state, error) — executable by service_role only
-//   (see supabase/pending-migrations/). Idempotent; never downgrades a final state.
+//   (see supabase/migrations/20261119225531_school_notify_apply_gateway_event.sql). Idempotent; never downgrades a final state.
 // * Never logs phone numbers, bodies, signatures or keys. Body limited to 64 KB.
 import { MAX_WEBHOOK_BYTES, parseEvent, verifySignature } from './webhook.ts';
 

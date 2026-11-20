@@ -31,7 +31,9 @@ npm run preview   # serve the production build locally
 
 The build reads `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`. In CI they come from the
 repository **variables** (`vars.*`). Only the publishable key is ever used in the browser — never a
-service-role / secret key.
+service-role / secret key. The dedicated SchoolNotify project is
+`https://xxaafyikewdokbkzqzqm.supabase.co`. Updating those two variables and merging to `main`
+is what points the live GitHub Pages build at that project.
 
 ## Login
 
@@ -50,7 +52,8 @@ imports are written in batches of 500.
 
 `localStorage` only holds non-sensitive UI preferences (`sn_*` keys: school name, send mode,
 segment price). The data of the old browser-only version (`resal_*` keys) is **ignored**: it is not
-read, migrated or deleted.
+read, migrated or deleted. Auth sessions use a `school-notify-auth:<project-host>` key, so
+switching the project URL requires a fresh login and does not wipe `resal_*` or `sn_*` keys.
 
 Backup (Settings → backup): JSON export of the cloud data plus non-secret settings (school name,
 send-mode, segment price, batch delay) and saved recipient groups. Moodle credentials, student
@@ -59,8 +62,8 @@ notes, and SMSGate server secrets are never included. Restore previews the file,
 cloud rows). A reminder appears if no backup was downloaded in 7 days. Reports can be exported
 to Excel (current filters, test/hidden campaigns excluded by default, per-campaign totals).
 Named recipient groups can be saved from the send screen; they sync to
-`school_notify.recipient_groups` once that pending migration is applied, and otherwise stay in
-`localStorage` + the backup file.
+`school_notify.recipient_groups` (see `supabase/migrations/20261119225536_school_notify_recipient_groups.sql`)
+and otherwise stay in `localStorage` + the backup file if the table is unavailable.
 
 ## Moodle tools
 
@@ -75,8 +78,8 @@ Per-section quiz windows (title, close time, duration, attempts, and a launcher 
 the form `https://mhzcis.github.io/moodle-quiz-launcher/?id=<quizId>`) feed the
 `{{رابط_الاختبار}}` and `{{موعد_الإغلاق}}` placeholders and a one-click WhatsApp blurb
 (one section at a time — links are never mixed). Section windows sync to
-`school_notify.section_events` once that pending migration is applied; otherwise they
-stay in `localStorage` and the normal backup file.
+`school_notify.section_events` (see `supabase/migrations/20261119225547_school_notify_section_events.sql`);
+otherwise they stay in `localStorage` and the normal backup file if the table is unavailable.
 
 Moodle usernames and passwords are stored only in the owner-only table
 `school_notify.student_moodle_credentials` (RLS forced, `owner = auth.uid()` and
@@ -84,13 +87,13 @@ Moodle usernames and passwords are stored only in the owner-only table
 credentials” form, never through the regular student importer, and they are excluded
 from backups, student Excel exports, and reports. Sending a template that uses
 `{{كلمة_مرور_مودل}}` / `{{كلمة_المرور}}` (or the username aliases) requires an extra
-confirmation. If the pending migration has not been applied, the import is disabled and
+confirmation. If the credentials table is unavailable, the import is disabled and
 credentials are not written to the browser.
 
 Encryption of the password column is intentionally RLS-only: a pgcrypto key would still
 be revealed to the signed-in owner in the browser (or to anyone with the service-role
 key), so it would not be a simpler or more robust control than the existing owner-only
-RLS. See `supabase/pending-migrations/20261118_student_moodle_credentials.sql`.
+RLS. See `supabase/migrations/20261119225542_school_notify_student_moodle_credentials.sql`.
 
 ## SMS sending
 
@@ -109,19 +112,20 @@ gateway.
 ## Scheduled sending (server-side, off by default)
 
 Campaigns can still be reviewed and sent from the browser. Automatic server-side sending is
-implemented but **does not send anything until it is explicitly enabled after deploy**:
+implemented but **does not send anything until it is explicitly enabled**. The schema already
+lives in `supabase/migrations/20261119225557_school_notify_scheduled_send.sql` and is applied
+on the dedicated project (`scheduler_settings` defaults to `enabled = false`; quiet hours are
+22:00–07:00 Asia/Jerusalem). Remaining enablement steps:
 
-1. Apply `supabase/pending-migrations/20261118_scheduled_send.sql` (after a cloud backup). This
-   creates `school_notify.scheduler_settings` (per-owner kill switch, default `enabled = false`)
-   and `claim_due_campaigns()` (idempotent row lock, quiet hours 22:00–07:00 Asia/Jerusalem).
-2. Deploy the Edge Function `school-notify-scheduled` (`verify_jwt = false`) with the existing
-   `SMSGATE_*` secrets plus a new `SCHEDULER_CRON_SECRET`.
-3. Set the function secret `SCHEDULER_ENABLED` to the exact value `true`. Any other value (or a
-   missing secret) makes the function return without sending.
-4. Create a cron job (pg_cron + pg_net, or another trusted scheduler) that POSTs to the function
+1. Confirm the Edge Function `school-notify-scheduled` (`verify_jwt = false`) is deployed with
+   the existing `SMSGATE_*` secrets plus a `SCHEDULER_CRON_SECRET`.
+2. Set the function secret `SCHEDULER_ENABLED` to the exact value `true`. Any other value (or a
+   missing secret) makes the function return without sending. Leave this unset to keep
+   automatic sending off.
+3. Create a cron job (pg_cron + pg_net, or another trusted scheduler) that POSTs to the function
    with header `X-Scheduler-Secret`. The cron SQL in the migration file is commented out and must
    not be run with a secret pasted into a script.
-5. In the app (جدولة), type «تفعيل» and turn the per-account switch on. The switch is disabled
+4. In the app (جدولة), type «تفعيل» and turn the per-account switch on. The switch is disabled
    until the settings table exists, and it can be turned off at any time.
 
 Due campaigns are claimed with `FOR UPDATE SKIP LOCKED`, already-logged phones are skipped
